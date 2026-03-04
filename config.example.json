@@ -1,0 +1,37 @@
+{
+  "llm": {
+    "active": "deepseek",
+    "providers": {
+      "deepseek":  { "api_key": "", "model": "deepseek-chat",       "base_url": "https://api.deepseek.com/v1" },
+      "qwen":      { "api_key": "", "model": "qwen-plus",           "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+      "doubao":    { "api_key": "", "model": "doubao-pro-32k",      "base_url": "https://ark.cn-beijing.volces.com/api/v3" },
+      "glm":       { "api_key": "", "model": "glm-4",               "base_url": "https://open.bigmodel.cn/api/paas/v4" },
+      "minimax":   { "api_key": "", "model": "abab6.5s-chat",       "base_url": "https://api.minimax.chat/v1" },
+      "openai":    { "api_key": "", "model": "gpt-4o",              "base_url": "https://api.openai.com/v1" },
+"ollama":    { "api_key": "", "model": "qwen2.5",             "base_url": "http://localhost:11434/v1" },
+      "lmstudio":  { "api_key": "", "model": "local-model",         "base_url": "http://localhost:1234/v1" }
+    }
+  },
+  "tts": {
+    "active": "fish_audio",
+    "providers": {
+      "fish_audio": { "api_key": "", "reference_id": "de00397ed7f6477a8763a0d436ece815" },
+      "qwen3_tts":  { "base_url": "http://localhost:8887", "voice": "default" }
+    }
+  },
+  "stt": {
+    "active": "whisper_local",
+    "providers": {
+      "whisper_local": { "model": "medium", "device": "cpu", "language": "zh" },
+      "qwen3_asr":     { "base_url": "http://localhost:8888" }
+    }
+  },
+  "embedding": {
+    "active": "openai",
+    "providers": {
+      "openai":    { "api_key": "", "model": "text-embedding-ada-002", "base_url": "https://api.openai.com/v1" },
+      "deepseek":  { "api_key": "", "model": "deepseek-embedding",     "base_url": "https://api.deepseek.com/v1" },
+      "ollama":    { "api_key": "", "model": "nomic-embed-text",       "base_url": "http://localhost:11434/v1" }
+    }
+  }
+}

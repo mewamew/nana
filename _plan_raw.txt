@@ -1,0 +1,2008 @@
+I now have a thorough understanding of the entire codebase. Let me compile the detailed specs.
+
+---
+
+Here are the five detailed implementation specs (09-13) for the Nana project.
+
+---
+
+## Spec 09: Lip-sync (口型同步)
+
+```
+# 09-lip-sync — 口型同步
+
+**Status: 🔲 Pending**
+
+## 背景与目标
+
+当前 TTS 音频播放时，Live2D 模型嘴巴保持静止，缺乏拟真感。
+
+本 spec 为 TTS 播放期间加入**音量驱动的口型同步**：通过 Web Audio API 实时分析音频音量，映射到 Live2D 模型的 `ParamMouthOpenY` 参数，使角色在"说话"时嘴巴跟随音频张合。
+
+---
+
+## 文件边界
+
+### 新建文件
+- `frontend/src/hooks/useLipSync.js`：封装 AudioContext + AnalyserNode + rAF 循环的自定义 Hook
+
+### 修改文件
+- `frontend/src/App.jsx`：改造 `playAudio()` 函数，使用 useLipSync Hook
+- `frontend/src/components/Live2DModel.jsx`：暴露新的 `setMouthOpenY(value)` 方法
+
+### 不得修改
+- `backend/` 目录下的任何文件（本 spec 为纯前端改动）
+- `frontend/src/api/client.js`
+- Live2D 模型初始化和渲染逻辑（仅添加嘴巴参数控制方法）
+
+---
+
+## 依赖
+
+- `07-frontend`（SSE 流式前端、`playAudio()` 函数）
+
+---
+
+## 接口契约
+
+### Live2DModel.jsx 新增暴露方法
+
+```javascript
+// 在 useImperativeHandle 中新增：
+setMouthOpenY: (value) => {
+  // value: 0.0（闭嘴）~ 1.0（张嘴最大）
+  if (!modelRef.current) return
+  const coreModel = modelRef.current.internalModel.coreModel
+  coreModel.setParameterValueById("ParamMouthOpenY", value)
+}
+```
+
+**关键参数**：PinkFox 模型的嘴巴张合参数 ID 为 `ParamMouthOpenY`（来自 `PinkFox.cdi3.json`，Name: "嘴 张开和闭合"）。
+
+### useLipSync Hook
+
+```javascript
+/**
+ * @param {React.RefObject} live2dRef - Live2DDisplay 组件的 ref
+ * @returns {{ playWithLipSync: (audioBase64: string) => void, stopLipSync: () => void }}
+ */
+function useLipSync(live2dRef)
+```
+
+---
+
+## 实现要求
+
+### 1. `frontend/src/hooks/useLipSync.js`
+
+```javascript
+import { useRef, useCallback } from 'react'
+
+// 音量 → 嘴巴张合映射参数
+const VOLUME_THRESHOLD = 0.02   // 低于此音量视为静音（闭嘴）
+const VOLUME_SCALE = 2.5        // 音量放大系数（根据 TTS 音频特性调整）
+const SMOOTHING = 0.3           // 平滑因子（0=无平滑，1=完全不变）
+
+export default function useLipSync(live2dRef) {
+  const audioContextRef = useRef(null)
+  const analyserRef = useRef(null)
+  const sourceRef = useRef(null)
+  const rafIdRef = useRef(null)
+  const currentAudioRef = useRef(null)
+  const prevValueRef = useRef(0)
+
+  const stopLipSync = useCallback(() => {
+    // 1. 取消 rAF
+    if (rafIdRef.current) {
+      cancelAnimationFrame(rafIdRef.current)
+      rafIdRef.current = null
+    }
+    // 2. 断开音频节点
+    if (sourceRef.current) {
+      sourceRef.current.disconnect()
+      sourceRef.current = null
+    }
+    // 3. 复位嘴巴参数
+    if (live2dRef.current) {
+      live2dRef.current.setMouthOpenY(0)
+    }
+    prevValueRef.current = 0
+    // 4. 停止 Audio 元素
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause()
+      currentAudioRef.current = null
+    }
+  }, [live2dRef])
+
+  const playWithLipSync = useCallback((audioBase64) => {
+    // 先停止上一次的口型同步
+    stopLipSync()
+
+    try {
+      // 解码 base64 → Blob → Object URL
+      const blob = new Blob(
+        [Uint8Array.from(atob(audioBase64), c => c.charCodeAt(0))],
+        { type: 'audio/mpeg' }
+      )
+      const url = URL.createObjectURL(blob)
+      const audio = new Audio(url)
+      currentAudioRef.current = audio
+
+      // 惰性创建 AudioContext（浏览器要求用户交互后才能创建）
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)()
+      }
+      const ctx = audioContextRef.current
+
+      // 创建 AnalyserNode
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 256
+      analyser.smoothingTimeConstant = 0.5
+      analyserRef.current = analyser
+
+      // Audio 元素 → MediaElementSource → AnalyserNode → destination
+      const source = ctx.createMediaElementSource(audio)
+      source.connect(analyser)
+      analyser.connect(ctx.destination)
+      sourceRef.current = source
+
+      // rAF 循环：读取音量 → 映射嘴巴参数
+      const dataArray = new Uint8Array(analyser.frequencyBinCount)
+
+      const updateMouth = () => {
+        analyser.getByteFrequencyData(dataArray)
+
+        // 计算平均音量 (0~255 → 0~1)
+        let sum = 0
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i]
+        }
+        let volume = sum / dataArray.length / 255
+
+        // 应用阈值和缩放
+        if (volume < VOLUME_THRESHOLD) {
+          volume = 0
+        } else {
+          volume = Math.min(1.0, (volume - VOLUME_THRESHOLD) * VOLUME_SCALE)
+        }
+
+        // 平滑处理（避免嘴巴抖动）
+        const smoothed = prevValueRef.current * SMOOTHING + volume * (1 - SMOOTHING)
+        prevValueRef.current = smoothed
+
+        // 设置 Live2D 嘴巴参数
+        if (live2dRef.current) {
+          live2dRef.current.setMouthOpenY(smoothed)
+        }
+
+        rafIdRef.current = requestAnimationFrame(updateMouth)
+      }
+
+      // 音频开始播放后启动循环
+      audio.onplay = () => {
+        // 确保 AudioContext 已激活（应对 suspended 状态）
+        if (ctx.state === 'suspended') ctx.resume()
+        updateMouth()
+      }
+
+      // 音频结束时停止
+      audio.onended = () => {
+        stopLipSync()
+        URL.revokeObjectURL(url)
+      }
+
+      audio.onerror = () => {
+        stopLipSync()
+        URL.revokeObjectURL(url)
+      }
+
+      audio.play().catch(e => {
+        console.error('[LipSync] Audio play error:', e)
+        stopLipSync()
+      })
+    } catch (e) {
+      console.error('[LipSync] Setup error:', e)
+      stopLipSync()
+    }
+  }, [live2dRef, stopLipSync])
+
+  return { playWithLipSync, stopLipSync }
+}
+```
+
+### 2. `Live2DModel.jsx` 修改
+
+在 `useImperativeHandle` 的返回对象中添加 `setMouthOpenY` 方法：
+
+```javascript
+useImperativeHandle(ref, () => ({
+  showExpression: (expression) => { /* ...existing... */ },
+  setTracking: (enabled) => { /* ...existing... */ },
+
+  // 新增：设置嘴巴张合参数（0.0 ~ 1.0）
+  setMouthOpenY: (value) => {
+    if (!modelRef.current) return
+    const coreModel = modelRef.current.internalModel.coreModel
+    coreModel.setParameterValueById("ParamMouthOpenY", value)
+  }
+}))
+```
+
+**注意**：仅在 `useImperativeHandle` 中添加方法，不修改 `useLayoutEffect` 中的初始化逻辑。
+
+### 3. `App.jsx` 修改
+
+```javascript
+import useLipSync from './hooks/useLipSync'
+
+function App() {
+  // ...existing state...
+  const { playWithLipSync, stopLipSync } = useLipSync(live2dRef)
+
+  // 删除顶部的 playAudio() 独立函数
+  // 将 onAudio callback 改为使用 playWithLipSync
+
+  const handleSendMessage = (directMessage) => {
+    // ...existing code...
+    api.chatStream(text, {
+      onText: (chunk) => { /* ...existing... */ },
+      onExpression: (expression) => { /* ...existing... */ },
+      onAudio: (audioBase64) => {
+        playWithLipSync(audioBase64)  // 替换原来的 playAudio(audioBase64)
+      },
+      onDone: () => { /* ...existing... */ },
+      onError: (msg) => { /* ...existing... */ },
+    })
+  }
+
+  // ...rest unchanged...
+}
+```
+
+**App.jsx 的 `playAudio()` 函数删除**（第 8-21 行），由 `useLipSync` 的 `playWithLipSync` 完全取代。
+
+---
+
+## 关键设计决策
+
+| 问题 | 决策 |
+|------|------|
+| 音量分析方式 | `getByteFrequencyData`（频域），比 `getByteTimeDomainData` 更稳定 |
+| 为什么不用 wlipsync 库 | 项目体量小，简单音量映射足够，不引入额外依赖 |
+| AudioContext 复用 | 全局复用单个 AudioContext（惰性创建），避免浏览器限制 |
+| 平滑处理 | 线性插值 `SMOOTHING=0.3`，防止嘴巴在安静段快速闪烁 |
+| MediaElementSource 限制 | 同一 Audio 元素只能创建一个 MediaElementSource，因此每次新音频创建新 Audio 元素 |
+| 音频播放中发新消息 | `playWithLipSync` 开头调用 `stopLipSync()` 停止上一段 |
+
+---
+
+## 约束
+
+- 不引入任何新的 npm 依赖
+- `AudioContext` 在浏览器不支持时静默降级（直接用普通 Audio 播放，无口型同步）
+- `setMouthOpenY` 的值范围严格为 `[0.0, 1.0]`
+- rAF 循环在音频结束后必须清理，避免内存泄漏
+- 不修改 Live2D 模型文件（.model3.json / .cdi3.json）
+
+---
+
+## 验收标准
+
+- [ ] TTS 音频播放时，Live2D 角色嘴巴随音量张合
+- [ ] 音频结束后嘴巴自动回到闭合状态
+- [ ] 连续发送两条消息，第一段音频被正确中断，第二段正常播放
+- [ ] 浏览器不支持 AudioContext 时不报错，音频仍然能正常播放（降级）
+- [ ] 没有 TTS 音频时（TTS 未配置），不影响其他功能
+- [ ] 嘴巴张合动画流畅，无明显抖动
+```
+
+---
+
+## Spec 10: Streaming Expression (流式表情解析)
+
+```
+# 10-streaming-expression — 流式表情解析
+
+**Status: 🔲 Pending**
+
+## 背景与目标
+
+当前表情处理流程：
+1. LLM 流式输出完整 JSON 文本
+2. 所有 text 事件发送完毕
+3. 在 `chat_service.py` 中调用 `extract_expression()` 解析完整文本
+4. 发送 expression 事件
+5. 最后发送 audio 事件
+
+问题：表情总是在文字全部显示完之后才出现，用户看到一长串文字后才看到角色变换表情，体验不佳。
+
+**目标**：在 LLM 流式输出过程中，一旦检测到 `"expression"` 字段的值，立即发送 expression 事件，使表情与文字同步出现。
+
+---
+
+## 文件边界
+
+### 修改文件
+- `backend/chat_service.py`：在流式文本阶段增量解析 expression，检测到后立即 yield expression 事件
+
+### 不得修改
+- `backend/main_agent.py`（reply_stream 接口不变）
+- `backend/main.py`
+- `backend/prompts/reply.txt`
+- `frontend/` 目录下的任何文件（前端已支持 onExpression 回调，无需改动）
+- `backend/providers/`
+
+---
+
+## 依赖
+
+- `06-backend-api`（SSE 流式架构）
+- `07-frontend`（前端 onExpression 回调已就绪）
+
+---
+
+## 核心分析
+
+### LLM 输出格式
+
+LLM 被要求输出如下 JSON：
+```json
+{
+  "reply": "哼，才不是呢！",
+  "user_info": "用户喜欢猫",
+  "expression": "脸红"
+}
+```
+
+LLM 流式输出这个 JSON 时，token 是逐步生成的：
+```
+{"reply": "哼，才不 → 是呢！", "user_info": "用户 → 喜欢猫", "expression": " → 脸红"}
+```
+
+`expression` 字段通常在 JSON 末尾附近出现（按照 prompt 模板中的字段顺序）。但我们可以在流式输出过程中监测到 `"expression"` key 出现，并在其值完成后立即发送 expression 事件。
+
+### 策略
+
+使用**增量正则扫描**：在累积的 raw text 中寻找 `"expression"\s*:\s*"([^"]*)"` 模式。一旦匹配成功，立即发送 expression 事件。由于 expression 的值是一个短字符串（如 "脸红"），一般在几个 token 内就能完成。
+
+---
+
+## 实现要求
+
+### `chat_service.py` 修改
+
+将 `generate_reply_stream()` 方法改为在流式过程中检测 expression：
+
+```python
+import re
+from typing import AsyncGenerator
+
+class ChatService:
+    # ...existing __init__...
+
+    # 用于增量检测 expression 的正则
+    _EXPRESSION_PATTERN = re.compile(r'"expression"\s*:\s*"([^"]*)"')
+
+    async def generate_reply_stream(
+        self, message: str
+    ) -> AsyncGenerator[dict[str, str], None]:
+        """流式生成回复，按事件类型 yield 字典"""
+        chunks: list[str] = []
+        expression_sent = False  # 标记：expression 事件是否已发送
+
+        async for chunk in self.main_agent.reply_stream(message):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            yield {"type": "text", "content": chunk}
+
+            # 增量检测 expression（仅在未发送过 expression 时检测）
+            if not expression_sent:
+                accumulated = "".join(chunks)
+                match = self._EXPRESSION_PATTERN.search(accumulated)
+                if match:
+                    expression = match.group(1).strip()
+                    if expression:
+                        yield {"type": "expression", "content": expression}
+                        expression_sent = True
+
+        # 兜底：如果流式过程中未检测到 expression，从完整文本中提取
+        if not expression_sent:
+            full_text = "".join(chunks)
+            expression = self.main_agent.extract_expression(full_text)
+            if expression:
+                yield {"type": "expression", "content": expression}
+
+        # 合成语音（TTS 未实现时静默跳过）
+        try:
+            tts = get_tts()
+            if tts.is_configured():
+                full_text = "".join(chunks)
+                clean_text = self.main_agent.extract_reply_text(full_text)
+                audio_bytes = await tts.synthesize(clean_text)
+                if audio_bytes:
+                    audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+                    yield {"type": "audio", "content": audio_b64}
+        except NotImplementedError:
+            pass
+```
+
+### 优化：避免每次 chunk 都做全文正则扫描
+
+为了避免在每个 text chunk 到达时都对已累积的全文做正则匹配（O(n^2) 复杂度），使用一个**扫描偏移量**，只对新增部分及其前缀窗口做检测：
+
+```python
+async def generate_reply_stream(
+    self, message: str
+) -> AsyncGenerator[dict[str, str], None]:
+    chunks: list[str] = []
+    expression_sent = False
+    scan_offset = 0  # 上次扫描到的位置
+
+    async for chunk in self.main_agent.reply_stream(message):
+        if not chunk:
+            continue
+        chunks.append(chunk)
+        yield {"type": "text", "content": chunk}
+
+        if not expression_sent:
+            accumulated = "".join(chunks)
+            # 从 scan_offset 前的安全窗口开始扫描（"expression" 关键字可能跨 chunk）
+            search_start = max(0, scan_offset - 30)
+            match = self._EXPRESSION_PATTERN.search(accumulated, search_start)
+            if match:
+                expression = match.group(1).strip()
+                if expression:
+                    yield {"type": "expression", "content": expression}
+                    expression_sent = True
+            scan_offset = len(accumulated)
+
+    # 兜底
+    if not expression_sent:
+        full_text = "".join(chunks)
+        expression = self.main_agent.extract_expression(full_text)
+        if expression:
+            yield {"type": "expression", "content": expression}
+
+    # TTS（unchanged）
+    try:
+        tts = get_tts()
+        if tts.is_configured():
+            full_text = "".join(chunks)
+            clean_text = self.main_agent.extract_reply_text(full_text)
+            audio_bytes = await tts.synthesize(clean_text)
+            if audio_bytes:
+                audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+                yield {"type": "audio", "content": audio_b64}
+    except NotImplementedError:
+        pass
+```
+
+---
+
+## SSE 事件顺序变化
+
+### 之前（Spec 06 定义）：
+```
+text → text → text → ... → expression → audio → done
+```
+
+### 之后（本 spec）：
+```
+text → text → expression → text → ... → audio → done
+                ↑
+         expression 可能出现在 text 流中间
+```
+
+**前端兼容性**：前端 `client.js` 的 SSE 解析是按 `type` 字段 switch-case 分发的，不依赖事件顺序。`onExpression` 回调在任何时候被调用都能正确设置 Live2D 表情。因此前端无需任何修改。
+
+---
+
+## 关键设计决策
+
+| 问题 | 决策 |
+|------|------|
+| 是否修改 reply.txt 调整字段顺序 | 否。CONVENTIONS.md 禁止修改 reply.txt。通过增量扫描解决 |
+| 正则 vs JSON 流式解析器 | 正则。expression 值是简单字符串，不含嵌套结构，正则足够 |
+| expression 出现在流的哪个位置 | 取决于 LLM 输出顺序。通常 reply 先输出，expression 在后半段 |
+| expression 检测失败 | 兜底到 extract_expression()（与当前行为一致） |
+| 性能考虑 | scan_offset 窗口扫描避免 O(n^2)，对短回复（15字内）无性能问题 |
+| expression 事件是否可能重复 | 不会。expression_sent 布尔标记确保只发送一次 |
+
+---
+
+## 约束
+
+- expression 事件最多发送 1 次（与之前行为一致）
+- 不修改 `main_agent.py` 的 `reply_stream()` 接口
+- 不修改 `prompts/reply.txt`
+- 前端无需任何改动
+- 兜底逻辑必须保留（LLM 可能输出非标准 JSON）
+
+---
+
+## 验收标准
+
+- [ ] 发送消息后，表情在文字流式输出过程中出现（而非等到文字全部显示完）
+- [ ] expression 事件仅发送一次，内容正确
+- [ ] LLM 输出格式异常时（如缺少 expression 字段），不报错，兜底为空表情
+- [ ] TTS 音频仍然在 expression 之后正确发送
+- [ ] done 事件仍然是最后一个事件
+- [ ] 与 Spec 09 口型同步功能兼容（expression 和 audio 互不干扰）
+```
+
+---
+
+## Spec 11: Vector Memory (向量化记忆检索)
+
+```
+# 11-vector-memory — 向量化记忆检索
+
+**Status: 🔲 Pending**
+
+## 背景与目标
+
+当前 `conversation.py` 的 `retrieve()` 使用简单的关键词匹配和字符重叠评分来检索记忆摘要。这种方式存在严重局限：
+1. 无法理解语义相似性（"我讨厌吃辣" 和 "不喜欢辣椒" 无法匹配）
+2. 单字符重叠评分噪声大，精度低
+3. 中文分词缺失，检索质量差
+
+**目标**：引入 Embedding 向量检索，替代关键词匹配，使记忆检索具备语义理解能力。
+
+**设计原则**（借鉴 OpenClaw/AIRI）：
+- 保持简单：不引入 ChromaDB 或外部向量库，使用纯 Python + JSON 存储
+- 多级降级：Embedding API 失败 → 关键词匹配兜底
+- 缓存友好：按内容 hash 缓存 embedding，避免重复计算
+- 配置化：Embedding provider 通过 config.json 配置
+
+---
+
+## 文件边界
+
+### 新建文件
+- `backend/providers/embedding/__init__.py`：空文件
+- `backend/providers/embedding/base.py`：BaseEmbeddingProvider 抽象基类
+- `backend/providers/embedding/openai_compatible.py`：OpenAI 兼容的 Embedding 实现
+- `backend/embedding_utils.py`：cosine similarity 计算、L2 归一化等工具函数
+
+### 修改文件
+- `backend/conversation.py`：`retrieve()` 改为向量检索 + 关键词兜底；`_auto_archive()` 时生成 embedding
+- `backend/chat_service.py`：传入 embedding provider
+- `backend/providers/__init__.py`：新增 `get_embedding()` 工厂函数
+- `config.example.json`：新增 `embedding` 配置段
+
+### 不得修改
+- `backend/main_agent.py`
+- `backend/main.py`
+- `backend/prompts/reply.txt`
+- `frontend/` 目录
+
+---
+
+## 依赖
+
+- `01-provider-framework`（Provider 模式）
+- `05-memory-upgrade`（三层记忆架构、summaries.json）
+
+---
+
+## 配置格式
+
+在 `config.json` 中新增 `embedding` 段：
+
+```json
+{
+  "llm": { ... },
+  "tts": { ... },
+  "stt": { ... },
+  "embedding": {
+    "active": "openai",
+    "providers": {
+      "openai": {
+        "api_key": "",
+        "model": "text-embedding-3-small",
+        "base_url": "https://api.openai.com/v1"
+      },
+      "doubao": {
+        "api_key": "",
+        "model": "doubao-embedding",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3"
+      },
+      "ollama": {
+        "api_key": "",
+        "model": "nomic-embed-text",
+        "base_url": "http://localhost:11434/v1"
+      }
+    }
+  }
+}
+```
+
+---
+
+## 接口契约
+
+### BaseEmbeddingProvider
+
+```python
+# backend/providers/embedding/base.py
+
+from abc import ABC, abstractmethod
+
+class BaseEmbeddingProvider(ABC):
+    """所有 Embedding Provider 必须实现此接口"""
+
+    @abstractmethod
+    async def embed(self, text: str) -> list[float]:
+        """将单段文本转为向量，返回浮点数列表"""
+        ...
+
+    @abstractmethod
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """批量文本转向量，默认逐条调用 embed()"""
+        ...
+
+    def is_configured(self) -> bool:
+        return True
+```
+
+### OpenAICompatibleEmbeddingProvider
+
+```python
+# backend/providers/embedding/openai_compatible.py
+
+import httpx
+from providers.embedding.base import BaseEmbeddingProvider
+
+class OpenAICompatibleEmbeddingProvider(BaseEmbeddingProvider):
+    def __init__(self, provider_name: str, config: dict):
+        self.provider_name = provider_name
+        self.api_key = config.get("api_key", "")
+        self.model = config.get("model", "text-embedding-3-small")
+        self.base_url = config.get("base_url", "https://api.openai.com/v1")
+
+    async def embed(self, text: str) -> list[float]:
+        """调用 /embeddings 端点获取单条文本的 embedding"""
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10, read=30, write=10, pool=10),
+            verify=False
+        ) as client:
+            response = await client.post(
+                f"{self.base_url.rstrip('/')}/embeddings",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "input": text,
+                    "model": self.model,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data["data"][0]["embedding"]
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """批量获取 embedding（OpenAI API 原生支持 batch input）"""
+        if not texts:
+            return []
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10, read=60, write=10, pool=10),
+            verify=False
+        ) as client:
+            response = await client.post(
+                f"{self.base_url.rstrip('/')}/embeddings",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "input": texts,
+                    "model": self.model,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            # 按 index 排序确保顺序正确
+            sorted_data = sorted(data["data"], key=lambda x: x["index"])
+            return [item["embedding"] for item in sorted_data]
+
+    def is_configured(self) -> bool:
+        if self.provider_name == "ollama":
+            return True
+        return bool(self.api_key)
+```
+
+### 工厂函数
+
+```python
+# 在 backend/providers/__init__.py 中新增
+
+def get_embedding():
+    """返回当前配置的 Embedding Provider，未配置时返回 None"""
+    try:
+        cfg = ConfigManager.load()
+        emb_cfg = cfg.get("embedding")
+        if not emb_cfg:
+            return None
+        active = emb_cfg.get("active", "")
+        provider_cfg = emb_cfg.get("providers", {}).get(active, {})
+        if not provider_cfg:
+            return None
+
+        from providers.embedding.openai_compatible import OpenAICompatibleEmbeddingProvider
+        provider = OpenAICompatibleEmbeddingProvider(active, provider_cfg)
+        if not provider.is_configured():
+            return None
+        return provider
+    except Exception as e:
+        print(f"[Embedding] Provider 初始化失败: {e}")
+        return None
+```
+
+### embedding_utils.py
+
+```python
+# backend/embedding_utils.py
+
+import hashlib
+import json
+import math
+import os
+from typing import Optional
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """计算两个向量的余弦相似度"""
+    if len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def l2_normalize(vec: list[float]) -> list[float]:
+    """L2 归一化向量"""
+    norm = math.sqrt(sum(x * x for x in vec))
+    if norm == 0:
+        return vec
+    return [x / norm for x in vec]
+
+
+def content_hash(text: str) -> str:
+    """计算文本内容的 SHA-256 hash（用于缓存键）"""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+class EmbeddingCache:
+    """基于 JSON 文件的 embedding 缓存"""
+
+    def __init__(self, cache_path: str, max_entries: int = 500):
+        self.cache_path = cache_path
+        self.max_entries = max_entries
+        self.cache: dict[str, list[float]] = self._load()
+
+    def _load(self) -> dict[str, list[float]]:
+        try:
+            if os.path.exists(self.cache_path):
+                with open(self.cache_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"[EmbeddingCache] 加载缓存失败: {e}")
+        return {}
+
+    def _save(self) -> None:
+        os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
+        with open(self.cache_path, "w", encoding="utf-8") as f:
+            json.dump(self.cache, f, ensure_ascii=False)
+
+    def get(self, text: str) -> Optional[list[float]]:
+        """根据文本 hash 查找缓存的 embedding"""
+        key = content_hash(text)
+        return self.cache.get(key)
+
+    def put(self, text: str, embedding: list[float]) -> None:
+        """缓存 embedding，超过上限时淘汰最早的条目"""
+        key = content_hash(text)
+        self.cache[key] = embedding
+        # 简单淘汰：超过上限时删除前 10% 的条目
+        if len(self.cache) > self.max_entries:
+            keys = list(self.cache.keys())
+            remove_count = len(keys) // 10
+            for k in keys[:remove_count]:
+                del self.cache[k]
+        self._save()
+```
+
+---
+
+## conversation.py 修改
+
+### `__init__()` 新增参数
+
+```python
+class ConversationHistory:
+    # ...existing class variables...
+
+    def __init__(self, max_turns: int = 20, llm_provider=None, embedding_provider=None):
+        # ...existing init code...
+        self.embedding_provider = embedding_provider
+
+        # Embedding 缓存
+        self.embedding_cache_path = os.path.join(
+            os.path.dirname(__file__), "..", "save", "memory", "embedding_cache.json"
+        )
+        from embedding_utils import EmbeddingCache
+        self.embedding_cache = EmbeddingCache(self.embedding_cache_path)
+```
+
+### summaries.json 扩展格式
+
+每条摘要增加 `embedding` 字段：
+
+```json
+[
+  {
+    "id": "uuid",
+    "summary": "用户聊了关于猫的话题...",
+    "topics": "猫,宠物",
+    "timestamp": "2026-03-04T14:30:00",
+    "turn_count": 10,
+    "embedding": [0.012, -0.034, ...]
+  }
+]
+```
+
+旧数据中 `embedding` 为 `null` 或不存在的条目，在检索时降级为关键词匹配。
+
+### `_auto_archive()` 增加 embedding 生成
+
+在现有归档逻辑中，摘要存入 `self.summaries` 时，异步生成 embedding：
+
+```python
+async def _auto_archive(self):
+    """自动归档一半的对话（LLM 双重提取 + Embedding 生成）"""
+    if not self.turns:
+        return
+
+    archive_count = len(self.turns) // 2
+    archive_turns = self.turns[:archive_count]
+
+    try:
+        result = await self._extract_memory(archive_turns)
+
+        print(f"[Memory] 归档 {archive_count} 轮对话")
+        print(f"[Memory] 摘要: {result['summary'][:100]}...")
+
+        # 生成摘要的 embedding
+        embedding = await self._get_embedding(result["summary"])
+
+        # Tier 2: 摘要存入 JSON（含 embedding）
+        self.summaries.append({
+            "id": str(uuid.uuid4()),
+            "summary": result["summary"],
+            "topics": result.get("topics", ""),
+            "timestamp": datetime.now().isoformat(),
+            "turn_count": archive_count,
+            "embedding": embedding,  # 可能为 None
+        })
+        self._save_summaries()
+
+        # Tier 3: 用户画像增量合并
+        if result.get("user_facts"):
+            self._merge_profile(result["user_facts"])
+    except Exception as e:
+        print(f"[Memory] 归档处理失败: {e}")
+
+    self.turns = self.turns[archive_count:]
+```
+
+### `_get_embedding()` 方法
+
+```python
+async def _get_embedding(self, text: str) -> list[float] | None:
+    """获取文本的 embedding 向量，优先使用缓存"""
+    if not self.embedding_provider:
+        return None
+
+    # 检查缓存
+    cached = self.embedding_cache.get(text)
+    if cached is not None:
+        return cached
+
+    try:
+        from embedding_utils import l2_normalize
+        embedding = await self.embedding_provider.embed(text)
+        embedding = l2_normalize(embedding)
+        self.embedding_cache.put(text, embedding)
+        return embedding
+    except Exception as e:
+        print(f"[Memory] Embedding 生成失败: {e}")
+        return None
+```
+
+### `retrieve()` 改造
+
+```python
+def retrieve(self, user_message: str, n_results: int = 3) -> list[str]:
+    """获取与用户消息最相关的历史记忆（向量检索 + 关键词兜底）"""
+    if not self.summaries:
+        return []
+
+    # 尝试向量检索
+    results = self._retrieve_vector(user_message, n_results)
+    if results:
+        return results
+
+    # 降级：关键词匹配（与原逻辑一致）
+    return self._retrieve_keyword(user_message, n_results)
+
+async def retrieve_async(self, user_message: str, n_results: int = 3) -> list[str]:
+    """异步版本的 retrieve（支持实时生成查询 embedding）"""
+    if not self.summaries:
+        return []
+
+    # 尝试向量检索
+    query_embedding = await self._get_embedding(user_message)
+    if query_embedding:
+        results = self._retrieve_by_embedding(query_embedding, n_results)
+        if results:
+            return results
+
+    # 降级：关键词匹配
+    return self._retrieve_keyword(user_message, n_results)
+
+def _retrieve_vector(self, user_message: str, n_results: int) -> list[str]:
+    """同步向量检索（使用缓存的查询 embedding）"""
+    cached_embedding = self.embedding_cache.get(user_message)
+    if not cached_embedding:
+        return []  # 无缓存，降级到关键词
+    return self._retrieve_by_embedding(cached_embedding, n_results)
+
+def _retrieve_by_embedding(
+    self, query_embedding: list[float], n_results: int
+) -> list[str]:
+    """根据查询向量在摘要中做余弦相似度排序"""
+    from embedding_utils import cosine_similarity
+
+    scored: list[tuple[float, str]] = []
+    for item in self.summaries:
+        emb = item.get("embedding")
+        if not emb:
+            continue
+        score = cosine_similarity(query_embedding, emb)
+        if score > 0.3:  # 最低相似度阈值
+            scored.append((score, item["summary"]))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [s[1] for s in scored[:n_results]]
+
+def _retrieve_keyword(self, user_message: str, n_results: int) -> list[str]:
+    """关键词匹配检索（原 retrieve 逻辑）"""
+    scored = []
+    for item in self.summaries:
+        score = 0
+        topics = [t.strip() for t in item.get("topics", "").split(",") if t.strip()]
+        for topic in topics:
+            if topic in user_message:
+                score += 2
+        summary = item.get("summary", "")
+        for char in set(user_message):
+            if char in summary and char.strip():
+                score += 0.1
+        if score > 0:
+            scored.append((score, item["summary"]))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    results = [s[1] for s in scored[:n_results]]
+
+    if not results:
+        results = [item["summary"] for item in self.summaries[-n_results:]]
+    return results
+```
+
+### main_agent.py 中 retrieve 的调用方式
+
+当前 `_get_relevant_memories()` 调用的是同步的 `retrieve()`。由于 `_get_relevant_memories` 在 `reply_stream()` 和 `reply()` 中被调用（两者都是 async 方法），改为使用异步版本：
+
+```python
+# main_agent.py - _get_relevant_memories 改为 async
+
+async def _get_relevant_memories(self, message: str) -> str:
+    memories = await self.conversation_history.retrieve_async(message, n_results=2)
+    return "\n".join(memories) if memories else "无补充信息"
+```
+
+以及在 `reply_stream()` 和 `reply()` 中：
+```python
+memory_text = await self._get_relevant_memories(message)  # 加 await
+```
+
+**注意**：这是对 `main_agent.py` 的最小改动（仅给 `_get_relevant_memories` 加 `async/await`），保持其他逻辑不变。
+
+---
+
+### chat_service.py 修改
+
+传入 embedding provider：
+
+```python
+from providers import get_llm, get_tts, get_embedding
+
+class ChatService:
+    def __init__(self) -> None:
+        self.llm_adapter = LLMProviderAdapter()
+        self.conversation_history = ConversationHistory(
+            max_turns=20,
+            llm_provider=get_llm(),
+            embedding_provider=get_embedding(),  # 新增
+        )
+        self.main_agent = MainAgent(self.llm_adapter, self.conversation_history)
+```
+
+---
+
+## 关键设计决策
+
+| 问题 | 决策 |
+|------|------|
+| 向量库选择 | 纯 JSON + Python cosine，不引入 ChromaDB/FAISS（摘要量级 <1000 条足够） |
+| Embedding 缓存 | JSON 文件，按内容 hash 缓存，最多 500 条 |
+| 检索降级 | 向量检索无结果 → 关键词匹配 → 最近 N 条兜底 |
+| Embedding 为 None | 旧数据无 embedding 的条目在向量检索中被跳过，进入关键词兜底 |
+| 相似度阈值 | 0.3（cosine similarity），低于此分数视为不相关 |
+| retrieve 保持同步签名 | 新增 retrieve_async 异步版本，原 retrieve() 签名保持不变（供 tools.py 调用） |
+| Embedding 维度 | 不做硬编码，跟随 provider 返回的维度 |
+
+---
+
+## 约束
+
+- 不引入 ChromaDB、FAISS 或任何外部向量库依赖
+- `retrieve()` 的签名不变（同步方法，关键词匹配）
+- 新增的 `retrieve_async()` 是增强版本（先向量后关键词）
+- `embedding` 配置为可选段，未配置时系统行为与当前完全一致
+- `summaries.json` 格式向后兼容：旧数据缺少 `embedding` 字段不影响加载
+- Embedding API 失败时静默降级，不阻塞归档流程
+- 写入文件时使用 `encoding="utf-8"`
+
+---
+
+## 验收标准
+
+- [ ] `config.json` 配置了 embedding provider 后，归档的摘要包含 embedding 向量
+- [ ] `retrieve_async("我之前说过喜欢什么")` 能通过语义相似度找到包含"喜欢猫"的摘要
+- [ ] embedding provider 未配置时，检索行为与当前完全一致（关键词匹配）
+- [ ] embedding API 调用失败时不报错，降级为关键词匹配
+- [ ] 已缓存的 embedding 不再重复调用 API
+- [ ] 旧的 summaries.json（无 embedding 字段）能正常加载和检索
+- [ ] 新增的 embedding 段在 config.example.json 中有完整模板
+```
+
+---
+
+## Spec 12: Conversation Persistence (对话持久化)
+
+```
+# 12-conversation-persistence — 对话持久化
+
+**Status: 🔲 Pending**
+
+## 背景与目标
+
+当前 `ConversationHistory` 的 `self.turns` 列表存储在内存中，服务器重启后所有工作记忆丢失。用户需要重新从零开始对话，破坏了连续性体验。
+
+**目标**：
+1. 工作记忆（Tier 1）持久化到 SQLite，服务器重启后恢复
+2. 支持多会话（session），为未来多用户场景预留
+3. 前端本地缓存消息，页面刷新后恢复聊天界面
+
+---
+
+## 文件边界
+
+### 新建文件
+- `backend/database.py`：SQLite 数据库管理，表定义，CRUD 操作
+
+### 修改文件
+- `backend/conversation.py`：`add_dialog()` 写入 SQLite，`__init__()` 从 SQLite 恢复 turns
+- `backend/main.py`：支持 session_id 参数传递到 ChatService
+- `backend/chat_service.py`：支持按 session 管理独立 ConversationHistory
+- `frontend/src/App.jsx`：localStorage 缓存消息
+- `frontend/src/api/client.js`：chatStream 支持 session_id
+
+### 不得修改
+- `backend/prompts/reply.txt`
+- `backend/providers/`
+- `backend/tools.py`
+
+---
+
+## 依赖
+
+- `05-memory-upgrade`（ConversationHistory 架构）
+- `06-backend-api`（SSE 端点、ChatRequest）
+- `07-frontend`（前端架构）
+
+---
+
+## 数据库设计
+
+### 存储路径
+
+`save/nana.db`（SQLite 文件，已在 .gitignore 的 save/ 目录下）
+
+### 表结构
+
+```sql
+-- 对话轮次表
+CREATE TABLE IF NOT EXISTS turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL DEFAULT 'default',
+    user_message TEXT NOT NULL,
+    assistant_message TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    archived INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, archived);
+CREATE INDEX IF NOT EXISTS idx_turns_created ON turns(session_id, created_at);
+
+-- 会话元数据表
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    last_active TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    title TEXT DEFAULT ''
+);
+```
+
+---
+
+## 接口契约
+
+### database.py
+
+```python
+# backend/database.py
+
+import os
+import sqlite3
+from datetime import datetime
+from typing import Optional
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "..", "save", "nana.db")
+
+
+class Database:
+    """SQLite 数据库管理，单例模式"""
+
+    _instance: Optional["Database"] = None
+
+    def __init__(self) -> None:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        self.conn = sqlite3.connect(DB_PATH)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self._init_tables()
+
+    @classmethod
+    def get(cls) -> "Database":
+        if cls._instance is None:
+            cls._instance = Database()
+        return cls._instance
+
+    def _init_tables(self) -> None:
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL DEFAULT 'default',
+                user_message TEXT NOT NULL,
+                assistant_message TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                archived INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_turns_session
+                ON turns(session_id, archived);
+            CREATE INDEX IF NOT EXISTS idx_turns_created
+                ON turns(session_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                last_active TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                title TEXT DEFAULT ''
+            );
+        """)
+        self.conn.commit()
+
+    def save_turn(
+        self, session_id: str, user_message: str, assistant_message: str
+    ) -> int:
+        """保存一轮对话，返回行 ID"""
+        cursor = self.conn.execute(
+            "INSERT INTO turns (session_id, user_message, assistant_message) VALUES (?, ?, ?)",
+            (session_id, user_message, assistant_message),
+        )
+        self.conn.commit()
+        # 更新会话最后活跃时间
+        self.conn.execute(
+            """INSERT INTO sessions (session_id, last_active)
+               VALUES (?, datetime('now', 'localtime'))
+               ON CONFLICT(session_id)
+               DO UPDATE SET last_active = datetime('now', 'localtime')""",
+            (session_id,),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def load_turns(
+        self, session_id: str, limit: int = 20
+    ) -> list[dict]:
+        """加载指定会话的未归档对话（最近 limit 条）"""
+        rows = self.conn.execute(
+            """SELECT user_message, assistant_message, created_at
+               FROM turns
+               WHERE session_id = ? AND archived = 0
+               ORDER BY id DESC
+               LIMIT ?""",
+            (session_id, limit),
+        ).fetchall()
+        # 反转为时间正序
+        return [dict(r) for r in reversed(rows)]
+
+    def mark_archived(self, session_id: str, count: int) -> None:
+        """将最早的 count 条未归档记录标记为已归档"""
+        self.conn.execute(
+            """UPDATE turns SET archived = 1
+               WHERE id IN (
+                   SELECT id FROM turns
+                   WHERE session_id = ? AND archived = 0
+                   ORDER BY id ASC
+                   LIMIT ?
+               )""",
+            (session_id, count),
+        )
+        self.conn.commit()
+
+    def get_recent_messages(
+        self, session_id: str, limit: int = 50
+    ) -> list[dict]:
+        """获取最近的消息（含已归档），用于前端恢复聊天界面"""
+        rows = self.conn.execute(
+            """SELECT user_message, assistant_message, created_at
+               FROM turns
+               WHERE session_id = ?
+               ORDER BY id DESC
+               LIMIT ?""",
+            (session_id, limit),
+        ).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    def close(self) -> None:
+        self.conn.close()
+        Database._instance = None
+```
+
+---
+
+## conversation.py 修改
+
+### `__init__()` 从 SQLite 恢复
+
+```python
+class ConversationHistory:
+    # ...existing class variables...
+
+    def __init__(
+        self,
+        max_turns: int = 20,
+        llm_provider=None,
+        embedding_provider=None,
+        session_id: str = "default",
+    ):
+        self.session_id = session_id
+        self.max_turns = max_turns
+        self.llm_provider = llm_provider
+        self.embedding_provider = embedding_provider  # from spec 11
+
+        # 摘要存储
+        self.summaries_path = os.path.join(
+            os.path.dirname(__file__), "..", "save", "memory", "summaries.json"
+        )
+        self.summaries = self._load_summaries()
+
+        # Embedding 缓存 (from spec 11)
+        # ...
+
+        # 从 SQLite 恢复工作记忆
+        self.turns = self._restore_turns()
+
+    def _restore_turns(self) -> list:
+        """从 SQLite 恢复未归档的对话轮次"""
+        try:
+            from database import Database
+            db = Database.get()
+            rows = db.load_turns(self.session_id, limit=self.max_turns)
+            turns = []
+            for row in rows:
+                turns.append(ConversationTurn(row["user_message"], row["assistant_message"]))
+            if turns:
+                print(f"[Memory] 恢复了 {len(turns)} 轮对话 (session={self.session_id})")
+            return turns
+        except Exception as e:
+            print(f"[Memory] 恢复对话失败: {e}")
+            return []
+```
+
+### `add_dialog()` 同时写入 SQLite
+
+```python
+async def add_dialog(self, user_message: str, assistant_message: str):
+    """添加新对话，同时持久化到 SQLite"""
+    turn = ConversationTurn(user_message, assistant_message)
+    self.turns.append(turn)
+
+    # 持久化到 SQLite
+    try:
+        from database import Database
+        db = Database.get()
+        db.save_turn(self.session_id, user_message, assistant_message)
+    except Exception as e:
+        print(f"[Memory] 对话持久化失败: {e}")
+
+    # 当对话数量达到最大值时，自动归档一半的对话
+    if len(self.turns) >= self.max_turns:
+        await self._auto_archive()
+```
+
+### `_auto_archive()` 同步标记 SQLite 中的已归档记录
+
+```python
+async def _auto_archive(self):
+    """自动归档一半的对话"""
+    if not self.turns:
+        return
+
+    archive_count = len(self.turns) // 2
+    archive_turns = self.turns[:archive_count]
+
+    try:
+        result = await self._extract_memory(archive_turns)
+        # ...existing archival logic (summaries, profile, embedding)...
+    except Exception as e:
+        print(f"[Memory] 归档处理失败: {e}")
+
+    # SQLite 标记已归档
+    try:
+        from database import Database
+        db = Database.get()
+        db.mark_archived(self.session_id, archive_count)
+    except Exception as e:
+        print(f"[Memory] SQLite 归档标记失败: {e}")
+
+    self.turns = self.turns[archive_count:]
+```
+
+---
+
+## chat_service.py 修改
+
+支持按 session 管理独立的 ConversationHistory：
+
+```python
+class ChatService:
+    def __init__(self) -> None:
+        self.llm_adapter = LLMProviderAdapter()
+        # 缓存 session → (ConversationHistory, MainAgent) 的映射
+        self._sessions: dict[str, tuple] = {}
+
+    def _get_session(self, session_id: str = "default"):
+        """获取或创建指定 session 的 ConversationHistory 和 MainAgent"""
+        if session_id not in self._sessions:
+            from providers import get_llm, get_embedding
+            conversation = ConversationHistory(
+                max_turns=20,
+                llm_provider=get_llm(),
+                embedding_provider=get_embedding(),  # from spec 11, can be None
+                session_id=session_id,
+            )
+            agent = MainAgent(self.llm_adapter, conversation)
+            self._sessions[session_id] = (conversation, agent)
+        return self._sessions[session_id]
+
+    async def generate_reply_stream(
+        self, message: str, session_id: str = "default"
+    ) -> AsyncGenerator[dict[str, str], None]:
+        conversation, agent = self._get_session(session_id)
+
+        chunks: list[str] = []
+        expression_sent = False  # from spec 10
+        scan_offset = 0
+
+        async for chunk in agent.reply_stream(message):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            yield {"type": "text", "content": chunk}
+
+            # ...expression detection from spec 10...
+
+        # ...expression fallback, TTS (unchanged)...
+```
+
+---
+
+## main.py 修改
+
+传递 session_id 到 ChatService：
+
+```python
+@app.post("/api/chat")
+async def chat(request: ChatRequest) -> StreamingResponse:
+    session_id = request.session_id or "default"
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        try:
+            async for event in chat_service.generate_reply_stream(
+                request.message, session_id=session_id
+            ):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            error_event = {"type": "error", "content": str(e)}
+            yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+        finally:
+            yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+# 新增：获取历史消息的端点
+@app.get("/api/history")
+async def get_history(session_id: str = "default", limit: int = 50) -> JSONResponse:
+    from database import Database
+    db = Database.get()
+    messages = db.get_recent_messages(session_id, limit)
+    return JSONResponse(content={"messages": messages})
+```
+
+---
+
+## 前端修改
+
+### App.jsx
+
+```javascript
+// 新增：从后端加载历史消息
+useEffect(() => {
+  api.getHistory('default').then(data => {
+    if (data?.messages?.length) {
+      const restored = []
+      for (const m of data.messages) {
+        restored.push({ type: 'user', content: m.user_message })
+        restored.push({ type: 'assistant', content: m.assistant_message })
+      }
+      setMessages(restored)
+    }
+  }).catch(() => {})  // 静默失败
+}, [])
+```
+
+### api/client.js
+
+```javascript
+// 新增
+async getHistory(sessionId = 'default', limit = 50) {
+  const res = await fetch(
+    `${BASE_URL}/api/history?session_id=${sessionId}&limit=${limit}`
+  )
+  if (!res.ok) throw new Error(await readError(res))
+  return res.json()
+},
+```
+
+---
+
+## 关键设计决策
+
+| 问题 | 决策 |
+|------|------|
+| 存储选择 | SQLite（Python 内置，无额外依赖，事务支持） |
+| WAL 模式 | 开启 `PRAGMA journal_mode=WAL`（提高并发读写性能） |
+| 单例 vs 每次创建 | Database 单例，避免重复打开/关闭连接 |
+| session 管理 | ChatService 内部缓存，按 session_id 创建独立 ConversationHistory |
+| 前端持久化方式 | 从后端 API 加载历史（而非 localStorage），保证数据一致性 |
+| 归档标记 | archived 字段而非物理删除，保留完整历史 |
+| 线程安全 | SQLite 在 WAL 模式下支持单写多读，FastAPI 是单线程 async 不需要额外锁 |
+
+---
+
+## 约束
+
+- SQLite 文件路径在 `save/` 目录下（已 gitignore）
+- 不引入任何新的 Python 依赖（SQLite 是 Python 内置库）
+- `session_id` 默认为 `"default"`，保持向后兼容
+- 数据库操作失败时静默降级（print 错误，继续使用内存）
+- `retrieve()` 的签名和行为不受影响
+- 前端历史加载失败时不影响正常使用
+
+---
+
+## 验收标准
+
+- [ ] 发送几条消息后重启后端服务，对话历史自动恢复
+- [ ] 前端页面刷新后能显示之前的聊天记录
+- [ ] 归档后的对话在 SQLite 中被标记为 `archived=1`
+- [ ] 不同 session_id 的对话互不干扰
+- [ ] SQLite 文件不被提交到 git
+- [ ] 数据库损坏或不可用时，系统降级为纯内存模式
+- [ ] `/api/history` 端点返回正确的消息列表
+```
+
+---
+
+## Spec 13: Message Queue & Concurrency Control (消息队列与并发控制)
+
+```
+# 13-concurrency-control — 消息队列与并发控制
+
+**Status: 🔲 Pending**
+
+## 背景与目标
+
+当前系统在以下场景存在并发问题：
+
+1. **前端快速连发**：用户快速按 Enter 发送多条消息，虽然前端有 `loading` 状态禁用输入，但极端情况下（如按 Enter 的同时按下语音识别）可能触发多个并发请求
+2. **后端无锁**：多个 `/api/chat` 请求同时到达时，可能并发修改同一个 `ConversationHistory`（操作 `self.turns`、写 SQLite、写 JSON 文件），导致数据竞争
+3. **旧请求滞留**：用户发送第二条消息时，第一条的 SSE 流仍在推送中，前端可能交替收到两个流的事件，导致消息混乱
+
+**目标**：
+1. 后端：每个 session 同一时刻只处理一个请求（session-level lock）
+2. 前端：增强输入防抖，确保一次只有一个活跃请求
+3. Generation ID：为每次对话生成唯一 ID，前端可丢弃旧的流
+
+---
+
+## 文件边界
+
+### 新建文件
+- 无
+
+### 修改文件
+- `backend/chat_service.py`：加入 session-level asyncio.Lock，generation ID
+- `backend/main.py`：传递并返回 generation_id
+- `frontend/src/App.jsx`：generation ID 跟踪，丢弃旧流
+- `frontend/src/api/client.js`：chatStream 支持 AbortController
+
+### 不得修改
+- `backend/main_agent.py`
+- `backend/conversation.py`
+- `backend/providers/`
+- `backend/prompts/`
+
+---
+
+## 依赖
+
+- `06-backend-api`（SSE 端点）
+- `07-frontend`（前端架构）
+- `12-conversation-persistence`（session 管理）
+
+---
+
+## 实现要求
+
+### 1. 后端 Session Lock
+
+#### chat_service.py
+
+```python
+import asyncio
+import uuid
+from typing import AsyncGenerator
+
+class ChatService:
+    def __init__(self) -> None:
+        self.llm_adapter = LLMProviderAdapter()
+        self._sessions: dict[str, tuple] = {}
+        self._locks: dict[str, asyncio.Lock] = {}  # 新增：session-level locks
+        self._active_generation: dict[str, str] = {}  # 新增：session → 当前 generation_id
+
+    def _get_lock(self, session_id: str) -> asyncio.Lock:
+        """获取或创建指定 session 的锁"""
+        if session_id not in self._locks:
+            self._locks[session_id] = asyncio.Lock()
+        return self._locks[session_id]
+
+    async def generate_reply_stream(
+        self, message: str, session_id: str = "default"
+    ) -> AsyncGenerator[dict[str, str], None]:
+        """带 session 锁的流式生成"""
+        generation_id = str(uuid.uuid4())[:8]
+        lock = self._get_lock(session_id)
+
+        # 标记当前 generation
+        self._active_generation[session_id] = generation_id
+
+        # 发送 generation_id 作为首个事件
+        yield {"type": "generation_id", "content": generation_id}
+
+        async with lock:
+            # 获取锁后检查：如果已被新请求取代，直接结束
+            if self._active_generation.get(session_id) != generation_id:
+                print(f"[ChatService] generation {generation_id} 已被取代，跳过")
+                return
+
+            conversation, agent = self._get_session(session_id)
+
+            chunks: list[str] = []
+            expression_sent = False
+            scan_offset = 0
+
+            async for chunk in agent.reply_stream(message):
+                # 每个 chunk 前检查是否仍是活跃 generation
+                if self._active_generation.get(session_id) != generation_id:
+                    print(f"[ChatService] generation {generation_id} 中途被取代")
+                    return
+
+                if not chunk:
+                    continue
+                chunks.append(chunk)
+                yield {"type": "text", "content": chunk}
+
+                # expression 检测 (from spec 10)
+                if not expression_sent:
+                    accumulated = "".join(chunks)
+                    search_start = max(0, scan_offset - 30)
+                    match = self._EXPRESSION_PATTERN.search(accumulated, search_start)
+                    if match:
+                        expression = match.group(1).strip()
+                        if expression:
+                            yield {"type": "expression", "content": expression}
+                            expression_sent = True
+                    scan_offset = len(accumulated)
+
+            # 兜底 expression
+            if not expression_sent:
+                full_text = "".join(chunks)
+                expression = agent.extract_expression(full_text)
+                if expression:
+                    yield {"type": "expression", "content": expression}
+
+            # TTS
+            try:
+                tts = get_tts()
+                if tts.is_configured():
+                    full_text = "".join(chunks)
+                    clean_text = agent.extract_reply_text(full_text)
+                    audio_bytes = await tts.synthesize(clean_text)
+                    if audio_bytes:
+                        audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+                        yield {"type": "audio", "content": audio_b64}
+            except NotImplementedError:
+                pass
+```
+
+### 2. 后端 API 调整
+
+#### main.py
+
+SSE 事件流中新增 `generation_id` 事件类型：
+
+```
+data: {"type": "generation_id", "content": "a1b2c3d4"}
+data: {"type": "text",          "content": "哼"}
+data: {"type": "expression",    "content": "脸红"}
+data: {"type": "audio",         "content": "<base64>"}
+data: {"type": "done"}
+```
+
+main.py 的 `/api/chat` 端点代码不需要改动（已经在 event_stream 中 yield 了 ChatService 的所有事件）。
+
+### 3. 前端 Generation ID 跟踪
+
+#### App.jsx
+
+```javascript
+function App() {
+  // ...existing state...
+  const activeGenerationRef = useRef(null)  // 当前活跃的 generation ID
+  const abortControllerRef = useRef(null)   // 用于中断旧请求
+
+  const handleSendMessage = (directMessage) => {
+    const text = directMessage ?? input
+    if (!text.trim() || loading) return
+    if (!directMessage) setInput('')
+    setLoading(true)
+
+    // 中断上一个未完成的请求
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
+    const abortController = new AbortController()
+    abortControllerRef.current = abortController
+
+    setMessages(prev => [...prev, { type: 'user', content: text }])
+
+    let rawAccumulator = ''
+    let myGenerationId = null
+
+    api.chatStream(text, {
+      signal: abortController.signal,  // 传入 abort signal
+
+      onGenerationId: (id) => {
+        myGenerationId = id
+        activeGenerationRef.current = id
+      },
+      onText: (chunk) => {
+        // 检查是否仍是活跃 generation
+        if (myGenerationId && activeGenerationRef.current !== myGenerationId) {
+          // 旧流，中断
+          abortController.abort()
+          return
+        }
+        rawAccumulator += chunk
+        const replyText = extractReply(rawAccumulator)
+        if (replyText !== null) {
+          setMessages(prev => {
+            const last = prev[prev.length - 1]
+            if (last?.type === 'assistant') {
+              return [...prev.slice(0, -1), { type: 'assistant', content: replyText }]
+            }
+            return [...prev, { type: 'assistant', content: replyText }]
+          })
+        }
+      },
+      onExpression: (expression) => {
+        if (myGenerationId && activeGenerationRef.current !== myGenerationId) return
+        if (live2dRef.current) live2dRef.current.showExpression(expression)
+      },
+      onAudio: (audioBase64) => {
+        if (myGenerationId && activeGenerationRef.current !== myGenerationId) return
+        playWithLipSync(audioBase64)  // from spec 09
+      },
+      onDone: () => {
+        if (myGenerationId && activeGenerationRef.current !== myGenerationId) return
+        if (rawAccumulator) {
+          setMessages(prev => {
+            const last = prev[prev.length - 1]
+            if (last?.type !== 'assistant') {
+              const fallback = extractReply(rawAccumulator) ?? rawAccumulator
+              return [...prev, { type: 'assistant', content: fallback }]
+            }
+            return prev
+          })
+        }
+        setLoading(false)
+      },
+      onError: (msg) => {
+        if (myGenerationId && activeGenerationRef.current !== myGenerationId) return
+        console.error('Chat error:', msg)
+        setLoading(false)
+      },
+    })
+  }
+
+  // ...rest unchanged...
+}
+```
+
+#### api/client.js
+
+支持 AbortController 和 `generation_id` 事件：
+
+```javascript
+export const api = {
+  chatStream(message, callbacks = {}) {
+    const {
+      onText, onExpression, onAudio, onDone, onError,
+      onGenerationId,  // 新增
+      signal,          // 新增：AbortSignal
+    } = callbacks
+
+    const run = async () => {
+      const response = await fetch(`${BASE_URL}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, session_id: "default" }),
+        signal,  // 传入 AbortSignal
+      })
+
+      if (!response.ok) {
+        throw new Error(await readError(response))
+      }
+
+      if (!response.body) {
+        throw new Error("Empty response body")
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+
+        let boundary = buffer.indexOf("\n\n")
+        while (boundary !== -1) {
+          const event = buffer.slice(0, boundary)
+          buffer = buffer.slice(boundary + 2)
+
+          for (const line of event.split("\n")) {
+            if (!line.startsWith("data:")) continue
+            const data = line.slice(5).trim()
+            try {
+              const parsed = JSON.parse(data)
+              switch (parsed.type) {
+                case "generation_id":
+                  onGenerationId?.(parsed.content)
+                  break
+                case "text":
+                  onText?.(parsed.content)
+                  break
+                case "expression":
+                  onExpression?.(parsed.content)
+                  break
+                case "audio":
+                  onAudio?.(parsed.content)
+                  break
+                case "done":
+                  onDone?.()
+                  return
+                case "error":
+                  onError?.(parsed.content)
+                  return
+              }
+            } catch {
+              // 忽略解析失败的行
+            }
+          }
+
+          boundary = buffer.indexOf("\n\n")
+        }
+      }
+    }
+
+    run().catch((err) => {
+      // AbortError 是正常中断，不报错
+      if (err.name === 'AbortError') return
+      onError?.(err.message)
+    })
+  },
+
+  // ...other methods unchanged...
+}
+```
+
+---
+
+## SSE 事件协议更新
+
+新增 `generation_id` 事件类型：
+
+```
+data: {"type": "generation_id", "content": "a1b2c3d4"}    ← 新增
+data: {"type": "text",          "content": "哼"}
+data: {"type": "expression",    "content": "脸红"}
+data: {"type": "audio",         "content": "<base64>"}
+data: {"type": "done"}
+```
+
+**顺序约定**：
+1. `generation_id` 最先发送（在获取锁之前）
+2. `text` 事件在 LLM 生成时实时发送
+3. `expression` 事件可在 text 流中间出现（Spec 10）
+4. `audio` 事件在 TTS 完成后发送
+5. `done` 事件最后发送
+
+---
+
+## 并发场景处理
+
+### 场景 1：用户快速连发 2 条消息
+
+```
+T=0: 用户发 "你好"
+  → 前端创建 AbortController A, generationId = g1
+  → 后端收到请求，设 active_generation["default"] = g1
+  → 后端获取 session lock，开始处理
+
+T=0.5: 用户发 "今天天气如何"（input 虽 disabled，但假设通过语音输入）
+  → 前端调用 abortControllerRef.current.abort()，中断 g1 的 fetch
+  → 前端创建 AbortController B, generationId = g2
+  → 后端收到请求，设 active_generation["default"] = g2
+  → 后端尝试获取 session lock → 等待 g1 完成
+
+  g1 的流在下个 chunk 检查到 active_generation != g1 → return
+  lock 释放 → g2 获取 lock → 开始处理
+
+结果：g1 被中断，g2 正常完成
+```
+
+### 场景 2：后端正在处理时前端页面刷新
+
+```
+后端 g1 正在流式输出 → 前端断开 SSE 连接
+后端的 StreamingResponse 会检测到 client disconnect → 停止 yield
+lock 自然释放
+```
+
+### 场景 3：LLM 响应非常慢，用户等不及发新消息
+
+```
+g1 正在等待 LLM 响应 → 前端 abort g1 → 后端 g1 在下个 yield 检查到被取代 → return
+g2 等待 lock → 获取 lock → 正常处理
+```
+
+---
+
+## 关键设计决策
+
+| 问题 | 决策 |
+|------|------|
+| 锁粒度 | Session 级别（每个 session 一把锁） |
+| 锁类型 | `asyncio.Lock`（适用于 FastAPI 的 async 模型） |
+| 旧请求处理 | 后端检测 generation_id 不匹配后 return，前端 abort fetch |
+| Generation ID 格式 | UUID 前 8 位（足够区分快速连发的请求） |
+| 前端防抖 | loading 状态 + AbortController 双重保护 |
+| generation_id 事件 | 在获取锁之前发送，保证前端立即收到 |
+
+---
+
+## 约束
+
+- `asyncio.Lock` 是可重入安全的（FastAPI 在同一个 event loop 上执行所有请求）
+- `generation_id` 事件对前端是可选的（旧前端忽略未知 type 即可）
+- 不修改 `main_agent.py` 和 `conversation.py`
+- AbortError 在前端静默处理，不显示错误
+- 锁等待不设超时（依赖 LLM 自身的超时机制）
+- generation_id 检查是轻量操作（字典查找），不影响流式性能
+
+---
+
+## 验收标准
+
+- [ ] 快速连续发送两条消息，只有最后一条的回复被完整显示
+- [ ] 第一条消息的 SSE 流被正确中断（fetch abort）
+- [ ] 后端不会因并发修改 ConversationHistory 导致异常
+- [ ] generation_id 事件正确出现在 SSE 流的最前面
+- [ ] 正常单条消息发送流程不受影响
+- [ ] 旧版前端（不处理 generation_id）仍然兼容
+- [ ] 页面刷新时不会导致后端死锁
+```
+
+---
+
+## Summary: Implementation Order and Dependencies
+
+```
+Spec 09 (Lip-sync)                    ← 独立，可立即实现
+Spec 10 (Streaming Expression)        ← 独立，可立即实现
+
+Spec 11 (Vector Memory)              ← 依赖 05（已实现）
+Spec 12 (Conversation Persistence)   ← 依赖 05、06、07（均已实现）
+
+Spec 13 (Concurrency Control)        ← 依赖 12（session 管理）
+
+推荐实施顺序：
+  第 1 批（无依赖，可并行）：Spec 09 + Spec 10
+  第 2 批（可并行）：Spec 11 + Spec 12
+  第 3 批（依赖 12）：Spec 13
+```
+
+### Critical Files for Implementation
+
+- `D:\dev\nana\frontend\src\App.jsx` - Central hub modified by specs 09, 12, 13; handles audio playback, message flow, SSE callbacks
+- `D:\dev\nana\backend\chat_service.py` - Modified by specs 10, 11, 12, 13; orchestrates streaming, expression detection, session locks
+- `D:\dev\nana\backend\conversation.py` - Modified by specs 11, 12; core memory system with retrieve(), add_dialog(), archive
+- `D:\dev\nana\frontend\src\components\Live2DModel.jsx` - Modified by spec 09; exposes setMouthOpenY() for lip-sync (ParamMouthOpenY parameter confirmed in PinkFox.cdi3.json)
+- `D:\dev\nana\frontend\src\api\client.js` - Modified by specs 12, 13; SSE client needs AbortController support and generation_id handling

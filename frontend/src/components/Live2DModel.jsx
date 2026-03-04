@@ -9,6 +9,9 @@ const Live2DDisplay = forwardRef((props, ref) => {
   const pixiContainerRef = useRef(null)
   const appRef = useRef(null)
   const modelRef = useRef(null)
+  const activeExprRef = useRef(null)
+  const resetTimerRef = useRef(null)
+  const mouthValueRef = useRef(0)
 
   // 表情映射对象，使用中文作为 key
   const EXPRESSIONS = {
@@ -29,19 +32,32 @@ const Live2DDisplay = forwardRef((props, ref) => {
 
   // 暴露方法给父组件
   useImperativeHandle(ref, () => ({
-    // 使用中文参数的表情方法
-    showExpression: (expression, active = true) => {
-      if (modelRef.current) {
-        const expressionId = EXPRESSIONS[expression]
-        if (expressionId) {
-          modelRef.current.internalModel.coreModel.setParameterValueById(
-            expressionId, 
-            active ? 1 : 0
-          )
-        } else {
-          console.warn(`未知的表情: ${expression}`)
-        }
+    showExpression: (expression) => {
+      if (!modelRef.current) return
+      const expressionId = EXPRESSIONS[expression]
+      if (!expressionId) {
+        console.warn(`未知的表情: ${expression}`)
+        return
       }
+
+      const coreModel = modelRef.current.internalModel.coreModel
+
+      // 先复位旧表情
+      if (activeExprRef.current && activeExprRef.current !== expressionId) {
+        coreModel.setParameterValueById(activeExprRef.current, 0)
+      }
+
+      coreModel.setParameterValueById(expressionId, 1)
+      activeExprRef.current = expressionId
+
+      // 5 秒后自动复位
+      clearTimeout(resetTimerRef.current)
+      resetTimerRef.current = setTimeout(() => {
+        if (modelRef.current && activeExprRef.current === expressionId) {
+          coreModel.setParameterValueById(expressionId, 0)
+          activeExprRef.current = null
+        }
+      }, 5000)
     },
     
     // 新增：设置跟踪功能
@@ -51,6 +67,9 @@ const Live2DDisplay = forwardRef((props, ref) => {
         modelRef.current.internalModel.motionManager.settings.autoAddRandomMotion = enabled;
         console.log(`模型跟踪功能已${enabled ? '开启' : '关闭'}~`);
       }
+    },
+    setMouthOpenY: (value) => {
+      mouthValueRef.current = value
     }
   }))
 
@@ -110,6 +129,16 @@ const Live2DDisplay = forwardRef((props, ref) => {
         model.anchor.set(0.5, 0.5)
 
         app.stage.addChild(model)
+        window.__pixiApp = app
+        window.__live2dModel = model
+
+        // 在模型 update 之后、渲染之前写入口型参数，防止被 motion 覆盖
+        app.ticker.add(() => {
+          if (mouthValueRef.current > 0 && modelRef.current) {
+            modelRef.current.internalModel.coreModel
+              .setParameterValueById('ParamMouthOpenY', mouthValueRef.current)
+          }
+        })
 
         model.on('hit', (hitAreas) => {
           console.log('Hit:', hitAreas)
@@ -122,6 +151,7 @@ const Live2DDisplay = forwardRef((props, ref) => {
 
     return () => {
       isDestroyed = true
+      clearTimeout(resetTimerRef.current)
       if (modelRef.current) {
         modelRef.current.destroy()
         modelRef.current = null

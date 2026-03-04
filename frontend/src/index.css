@@ -29,29 +29,18 @@ a:hover {
   color: #535bf2;
 }
 
-/* 全局按钮基础样式 */
+/* 全局按钮最小化 reset */
 button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 8px 16px;
-  font-size: 1em;
-  font-weight: 500;
   font-family: inherit;
-  background-color: #646cff;
   cursor: pointer;
-  transition: all 0.25s;
-  color: white;
+  border: none;
+  background: none;
+  color: inherit;
+  padding: 0;
 }
-button:hover {
-  background-color: #535bf2;
-  transform: translateY(-1px);
-}
-button:active {
-  transform: translateY(0);
-}
-button:focus,
 button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+  outline: 2px solid #2FA4E7;
+  outline-offset: 2px;
 }
 
 /* 浅色主题适配 */
@@ -62,9 +51,5 @@ button:focus-visible {
   }
   a:hover {
     color: #747bff;
-  }
-  button {
-    background-color: #646cff;
-    color: white;
   }
 }
