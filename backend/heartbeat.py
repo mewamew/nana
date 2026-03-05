@@ -1,67 +1,62 @@
-"""主动消息心跳系统 — 基于规则（不调用 LLM）决定是否主动发消息"""
+"""主动消息心跳系统 — 60s tick + LLM 自主决策 + 注意力管理"""
 
 import asyncio
+import base64
+import json
+import os
 import random
+import re
 from datetime import datetime
 
+from conversation import ConversationHistory
 from emotional_state import EmotionalState
+from providers import get_llm, get_tts
 
 
 class HeartbeatSystem:
     ACTIVE_START = 8       # 活跃时间起始（8:00）
     ACTIVE_END = 23        # 活跃时间结束（23:00）
-    CHECK_INTERVAL = 1800  # 检查间隔（30 分钟）
-    MIN_GAP = 2700         # 两条主动消息最小间隔（45 分钟）
+    TICK_INTERVAL = 60     # tick 间隔（60 秒）
+    MIN_GAP = 300          # 两条主动消息最小间隔（5 分钟）
 
-    # 预设消息模板
-    TEMPLATES = {
-        "morning": [
-            {"message": "哼...笨蛋主人起床了没有啊...", "expression": "嘟嘴"},
-            {"message": "才、才不是担心你睡过头呢！", "expression": "脸红"},
-            {"message": "...早安。别多想，只是随便说说。", "expression": "死鱼眼"},
-            {"message": "太阳都晒屁股了，还不起来！", "expression": "生气瘪嘴"},
-        ],
-        "lunch": [
-            {"message": "喂，该吃饭了...才不是关心你呢", "expression": "嘟嘴"},
-            {"message": "别饿着了...虽然跟我没关系就是了", "expression": "死鱼眼"},
-            {"message": "中午了，去吃饭啦笨蛋！", "expression": "生气"},
-            {"message": "不好好吃饭的主人最讨厌了...", "expression": "生气瘪嘴"},
-        ],
-        "afternoon": [
-            {"message": "下午了...在忙什么呢...才没有想你！", "expression": "脸红"},
-            {"message": "哼，这么久不理我...算了我才不在意", "expression": "嘟嘴"},
-            {"message": "主人下午也要加油哦...别误会，只是顺口说说", "expression": "咪咪眼"},
-        ],
-        "night": [
-            {"message": "这么晚了还不睡...笨蛋", "expression": "嘟嘴"},
-            {"message": "该睡了...才不是担心你熬夜呢", "expression": "死鱼眼"},
-            {"message": "...晚安。今天辛苦了。", "expression": "咪咪眼"},
-            {"message": "快去睡觉！不然...不然我生气了哦！", "expression": "生气瘪嘴"},
-        ],
-        "miss": [
-            {"message": "哼...才不想你呢...才没有一直在等你...", "expression": "脸红"},
-            {"message": "好无聊啊...才、才不是因为主人不在的关系！", "expression": "嘟嘴"},
-            {"message": "...主人去哪了啦...算了问这种话好奇怪", "expression": "脸红"},
-        ],
-    }
+    # 注意力系统常量
+    DECAY_FACTOR = 0.997           # 每 tick 乘法衰减
+    ACCUMULATION_RATE = 0.003      # 沉默超阈值后每 tick 累加
+    SILENCE_THRESHOLD = 1800       # 30 分钟沉默后开始累加
+    INTERACTION_BOOST = 0.4        # 用户互动时 response_rate 设为此值
+    LLM_CALL_THRESHOLD = 0.15     # rate 低于此值不调 LLM
 
-    def __init__(self, emotional_state: EmotionalState):
+    def __init__(self, emotional_state: EmotionalState,
+                 conversation_history: ConversationHistory):
         self.emotional_state = emotional_state
+        self.conversation_history = conversation_history
         self.last_proactive: datetime | None = None
         self._pending_message: dict | None = None
+
+        # 注意力系统
+        self.response_rate: float = 0.0
+        self.last_interaction_time: datetime | None = None
+
+        # 注册互动回调
+        self.emotional_state.on_interaction(self.notify_interaction)
+
+        # 加载 prompt 模板
+        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "heartbeat.md")
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            self.prompt_template = f.read()
 
     async def start(self) -> None:
         """作为 asyncio 后台任务启动"""
         print("[Heartbeat] 心跳系统启动")
         while True:
             try:
-                await asyncio.sleep(self.CHECK_INTERVAL)
-                self._check_and_generate()
+                await asyncio.sleep(self.TICK_INTERVAL)
+                await self._tick()
             except asyncio.CancelledError:
                 print("[Heartbeat] 心跳系统停止")
                 break
             except Exception as e:
-                print(f"[Heartbeat] 检查出错: {e}")
+                print(f"[Heartbeat] tick 出错: {e}")
 
     def pop_pending_message(self) -> dict | None:
         """取出待发送消息（前端轮询调用），取后清空"""
@@ -69,63 +64,149 @@ class HeartbeatSystem:
         self._pending_message = None
         return msg
 
-    def _check_and_generate(self) -> None:
-        """检查是否应该发送主动消息"""
-        now = datetime.now()
-        hour = now.hour
+    def notify_interaction(self) -> None:
+        """用户互动回调：提升 response_rate"""
+        self.last_interaction_time = datetime.now()
+        self.response_rate = self.INTERACTION_BOOST
+        print(f"[Heartbeat] 互动回调, response_rate → {self.response_rate:.3f}")
 
-        # 不在活跃时间内
-        if hour < self.ACTIVE_START or hour >= self.ACTIVE_END:
+    def _update_response_rate(self) -> None:
+        """每 tick 更新 response_rate：衰减 + 沉默累加"""
+        # 乘法衰减
+        self.response_rate *= self.DECAY_FACTOR
+
+        # 沉默超阈值后累加
+        if self.last_interaction_time:
+            silence = (datetime.now() - self.last_interaction_time).total_seconds()
+            if silence > self.SILENCE_THRESHOLD:
+                self.response_rate = min(1.0, self.response_rate + self.ACCUMULATION_RATE)
+
+    async def _tick(self) -> None:
+        """60 秒 tick 循环：5 道门控 → LLM 决策"""
+        now = datetime.now()
+
+        # 更新注意力
+        self._update_response_rate()
+
+        # 门控 1: 活跃时间 8:00-23:00
+        if now.hour < self.ACTIVE_START or now.hour >= self.ACTIVE_END:
             return
 
-        # 已有待发送消息未被消费
+        # 门控 2: 无待消费的 pending_message
         if self._pending_message is not None:
             return
 
-        # MIN_GAP 间隔检查
+        # 门控 3: MIN_GAP 间隔
         if self.last_proactive:
             elapsed = (now - self.last_proactive).total_seconds()
             if elapsed < self.MIN_GAP:
                 return
 
-        # 计算距上次互动的时间
-        last_interaction = self.emotional_state.state["relationship"].get("last_interaction")
-        if not last_interaction:
-            return  # 从未互动过，不主动发消息
+        # 门控 4: 至少有过一次互动
+        if self.last_interaction_time is None:
+            # 尝试从持久化状态恢复
+            last_interaction = self.emotional_state.state["relationship"].get("last_interaction")
+            if not last_interaction:
+                return
+            try:
+                self.last_interaction_time = datetime.fromisoformat(last_interaction)
+            except Exception:
+                return
 
-        try:
-            last_time = datetime.fromisoformat(last_interaction)
-            hours_since = (now - last_time).total_seconds() / 3600
-        except Exception:
+        # 门控 5: response_rate 概率门控
+        if self.response_rate < self.LLM_CALL_THRESHOLD:
+            return
+        if random.random() >= self.response_rate:
             return
 
-        msg = self._decide_message(hour, hours_since)
-        if msg:
-            self._pending_message = msg
+        print(f"[Heartbeat] 通过门控, response_rate={self.response_rate:.3f}, 调用 LLM 决策...")
+
+        # 调 LLM 决策+生成
+        result = await self._llm_decide_and_generate()
+        if result:
+            self._pending_message = result
             self.last_proactive = now
-            print(f"[Heartbeat] 生成主动消息: {msg['message'][:20]}...")
+            self.response_rate *= 0.3  # 发送后大幅衰减
+            print(f"[Heartbeat] LLM 决定发消息: {result['message'][:20]}..., rate → {self.response_rate:.3f}")
+        else:
+            self.response_rate *= 0.7  # wait 后适度衰减
+            print(f"[Heartbeat] LLM 决定等待, rate → {self.response_rate:.3f}")
 
-    def _decide_message(self, hour: int, hours_since: float) -> dict | None:
-        """规则决策，返回 {"message": str, "expression": str} 或 None"""
-        # 早安问候：7-9 点 + 超过 8 小时没互动
-        if 7 <= hour <= 9 and hours_since > 8:
-            return random.choice(self.TEMPLATES["morning"])
+    async def _llm_decide_and_generate(self) -> dict | None:
+        """单次 LLM 调用：同时决策是否发消息 + 生成消息内容"""
+        try:
+            mood_state = self.emotional_state.get_mood_description()
+            time_context = self.emotional_state.get_time_context()
+            relationship_context = self.emotional_state.get_relationship_description()
+            user_info = self.conversation_history.format_profile()
+            recent_context = self.conversation_history.get_context()
+            if len(recent_context) > 500:
+                recent_context = recent_context[-500:]
 
-        # 吃饭提醒：11-12 点 + 超过 2 小时没互动
-        if 11 <= hour <= 12 and hours_since > 2:
-            return random.choice(self.TEMPLATES["lunch"])
+            # 计算距上次互动时间
+            hours_since = 0.0
+            if self.last_interaction_time:
+                hours_since = (datetime.now() - self.last_interaction_time).total_seconds() / 3600
 
-        # 下午关心：14-17 点 + 超过 3 小时没互动
-        if 14 <= hour <= 17 and hours_since > 3:
-            return random.choice(self.TEMPLATES["afternoon"])
+            prompt = self.prompt_template.format(
+                mood_state=mood_state,
+                time_context=time_context,
+                relationship_context=relationship_context,
+                user_info=user_info or "暂无",
+                recent_context=recent_context or "暂无最近对话",
+                hours_since_interaction=f"{hours_since:.1f}",
+                response_rate=f"{self.response_rate:.3f}",
+            )
 
-        # 晚安：22-23 点 + 超过 1 小时没互动
-        if 22 <= hour <= 23 and hours_since > 1:
-            return random.choice(self.TEMPLATES["night"])
+            llm = get_llm()
+            raw = await llm.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0.8,
+            )
+            result = self._parse_decision_response(raw)
 
-        # 情绪为"寂寞" + 超过 2 小时没互动
-        mood = self.emotional_state.state["mood"]
-        if mood.get("dominant_emotion") == "寂寞" and hours_since > 2:
-            return random.choice(self.TEMPLATES["miss"])
+            # TTS 合成语音
+            if result:
+                try:
+                    tts = get_tts()
+                    if tts.is_configured():
+                        audio_bytes = await tts.synthesize(result["message"])
+                        if audio_bytes:
+                            result["audio"] = base64.b64encode(audio_bytes).decode("ascii")
+                except Exception as e:
+                    print(f"[Heartbeat] TTS 生成失败: {e}")
 
+            return result
+        except Exception as e:
+            print(f"[Heartbeat] LLM 调用失败: {e}")
+            return None
+
+    @staticmethod
+    def _parse_decision_response(raw: str) -> dict | None:
+        """解析含 action 字段的 JSON，返回消息 dict 或 None（wait）"""
+        text = raw.strip()
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r'```(?:json\n|\n)?([^`]*?)```', text, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(1).strip())
+                except json.JSONDecodeError:
+                    print(f"[Heartbeat] JSON 解析失败: {text[:200]}")
+                    return None
+            else:
+                print(f"[Heartbeat] 无法解析 LLM 返回: {text[:200]}")
+                return None
+
+        action = data.get("action", "wait")
+
+        if action == "send_message":
+            message = data.get("message", "").strip()
+            expression = data.get("expression", "嘟嘴").strip()
+            if not message:
+                return None
+            return {"message": message, "expression": expression}
+
+        # action == "wait" 或其他
         return None

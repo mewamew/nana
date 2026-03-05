@@ -75,6 +75,7 @@ class EmotionalState:
 
     def __init__(self):
         self.state = self._load()
+        self._interaction_callbacks: list = []
         self._check_daily_reset()
         self.decay_mood()
         print(f"[Emotion] 加载状态: {self.state['mood']['dominant_emotion']} "
@@ -270,6 +271,10 @@ class EmotionalState:
 
         return result
 
+    def on_interaction(self, callback) -> None:
+        """注册互动回调，heartbeat 等模块通过此方法监听互动事件"""
+        self._interaction_callbacks.append(callback)
+
     def record_interaction(self) -> None:
         """每次互动调用：+1 daily count, +微量 affection/trust"""
         rel = self.state["relationship"]
@@ -293,6 +298,12 @@ class EmotionalState:
 
         self._check_stage_upgrade()
         self._save()
+
+        for cb in self._interaction_callbacks:
+            try:
+                cb()
+            except Exception:
+                pass
 
     def _check_stage_upgrade(self) -> None:
         """检查是否满足升级条件（三项阈值全部达标才升级）"""

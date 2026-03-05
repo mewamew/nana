@@ -65,21 +65,28 @@ nana/
 │   ├── chat_service.py           # 对话流程编排（调用 LLM/TTS）
 │   ├── main_agent.py             # AI Agent 核心逻辑（含 Agentic Loop）
 │   ├── conversation.py           # 记忆管理（JSON 文件存储）
+│   ├── emotional_state.py        # 情绪状态持久化 + 关系阶段 + 交互回调
+│   ├── heartbeat.py              # 心跳系统（60s tick + LLM 决策 + 注意力管理）
 │   ├── tools.py                  # 工具定义与执行器
 │   └── prompts/
-│       ├── reply.txt             # 角色系统提示词
-│       └── tool_decision.txt     # 工具决策 Prompt
+│       ├── soul.md               # 角色人设
+│       ├── reply.md              # 回复指令 Prompt
+│       ├── heartbeat.md          # 心跳 LLM 决策 Prompt
+│       ├── memory_extract.md     # 记忆提取 Prompt
+│       └── tool_decision.md      # 工具决策 Prompt
 │
 ├── frontend/
 │   └── src/
 │       ├── App.jsx
 │       ├── components/
-│       │   ├── Live2DModel.jsx
-│       │   ├── ConfigPanel.jsx   # 新增：配置 UI
-│       │   ├── VoiceInput.jsx    # 新增：语音输入按钮
+│       │   ├── Live2DModel.jsx   # PinkFox 模型渲染 + 表情/口型
+│       │   ├── ConfigPanel.jsx   # 配置 UI
+│       │   ├── VoiceInput.jsx    # 语音输入按钮
 │       │   └── LoadingDots.jsx
+│       ├── hooks/
+│       │   └── useLipSync.js     # lip sync hook（音频驱动口型）
 │       └── api/
-│           └── client.js         # 新增：统一 API 请求封装
+│           └── client.js         # 统一 API 请求封装
 │
 ├── config.json                   # 运行时配置（已加入 .gitignore）
 ├── config.example.json           # 配置模板（提交到 git）
@@ -262,11 +269,14 @@ data: {"type": "done"}
 data: {"type": "error",      "content": "LLM 服务暂时不可用"}
 ```
 
+**事件类型**：`generation_id` / `text` / `expression` / `audio` / `done` / `error`
+
 **顺序约定**：
-1. `text` 事件在 LLM 生成时实时发送（多个）
-2. `expression` 事件在 LLM 完整回复解析后发送（1个）
-3. `audio` 事件在 TTS 合成完成后发送（0或1个，取决于 TTS 是否启用）
-4. `done` 事件最后发送
+1. `generation_id` 事件标识本次生成（1个）
+2. `text` 事件在 LLM 生成时实时发送（多个）
+3. `expression` 事件在 LLM 完整回复解析后发送（1个）
+4. `audio` 事件在 TTS 合成完成后发送（0或1个，取决于 TTS 是否启用）
+5. `done` 事件最后发送
 
 ---
 
@@ -275,7 +285,9 @@ data: {"type": "error",      "content": "LLM 服务暂时不可用"}
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/chat` | SSE 流式对话 |
+| GET  | `/api/proactive` | 轮询主动消息（心跳系统生成） |
 | POST | `/api/stt` | 语音转文字（返回 JSON） |
+| GET  | `/api/history` | 获取对话历史 |
 | GET  | `/api/config` | 获取当前配置（脱敏，api_key 返回 `***`） |
 | POST | `/api/config` | 更新配置（传入完整或部分 config.json） |
 
@@ -304,9 +316,35 @@ format: "webm"
 }
 ```
 
+### `/api/proactive` 响应
+
+有消息时：
+```json
+{"message": "哼，你怎么还不来找我说话", "expression": "嘟嘴"}
+```
+
+无消息时：
+```json
+{"message": null}
+```
+
 ---
 
-## 8. 记忆系统设计
+## 8. 心跳系统
+
+详见 `specs/16-heartbeat-system.md`。
+
+**核心机制**：60 秒 tick 频率 → 5 道门控过滤 → LLM 自主决策是否发消息。通过 `response_rate` 注意力值做概率门控，避免过度调用 LLM。
+
+**关键组件**：
+- `HeartbeatSystem`（`heartbeat.py`）— tick 循环、门控、注意力系统
+- `EmotionalState.on_interaction()` — 交互回调，通知心跳系统用户活跃
+- `prompts/heartbeat.md` — LLM 决策 prompt，输出 `send_message` 或 `wait`
+- `/api/proactive` — 前端轮询取走待发消息
+
+---
+
+## 9. 记忆系统设计
 
 详见 `specs/05-memory-upgrade.md`。
 
@@ -324,11 +362,11 @@ format: "webm"
 
 ---
 
-## 9. 关键约束
+## 10. 关键约束
 
 1. **不使用 `.env` 文件**，配置统一由 `config.json` 管理
 2. **`config.json` 加入 `.gitignore`**，使用 `config.example.json` 作为模板
 3. **业务代码不直接 import 具体 Provider 类**，只通过工厂函数获取
-4. **不修改 `prompts/reply.txt`**（角色人设独立维护）
-5. **不修改 Live2D 相关逻辑**（`Live2DModel.jsx` 仅允许 `07-frontend` spec 修改）
+4. **不修改 `prompts/soul.md`**（角色人设独立维护）
+5. **Live2D 模型使用 PinkFox**（表情系统基于 PinkFox 参数 key2-key17）
 6. **Python 最低版本**：3.10（使用 `match` 语句和 `list[dict]` 泛型语法）

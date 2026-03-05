@@ -11,7 +11,7 @@ const LERP_WINDOW_MS = 80       // 平滑窗口
 const RAW_KEYS = ['A', 'E', 'I', 'O', 'U', 'S']
 const TO_VOWEL = { A:'A', E:'E', I:'I', O:'O', U:'U', S:'I' }
 
-export function useLipSync({ onMouthValue }) {
+export function useLipSync({ onMouthValue, onAudioEnd }) {
   const audioCtxRef = useRef(null)
   const wlipNodeRef = useRef(null)   // wLipSync AudioWorkletNode（全局单例）
   const rafIdRef = useRef(null)
@@ -90,20 +90,33 @@ export function useLipSync({ onMouthValue }) {
 
     let audioEnded = false
     let silentFrames = 0
+    let audioEndCalled = false
+
+    function callAudioEnd() {
+      if (!audioEndCalled) {
+        audioEndCalled = true
+        onMouthValue(0)
+        onAudioEnd?.()
+      }
+    }
 
     function tick() {
       const val = getMouthOpen()
       onMouthValue(val)
       if (audioEnded && val < 0.01) {
         silentFrames++
-        if (silentFrames >= 20) { onMouthValue(0); return }
+        if (silentFrames >= 20) { callAudioEnd(); return }
       } else {
         silentFrames = 0
       }
       rafIdRef.current = requestAnimationFrame(tick)
     }
 
-    source.onended = () => { audioEnded = true }
+    // onended 作为保底触发：音频结束后 500ms 若 tick 未触发则直接调用
+    source.onended = () => {
+      audioEnded = true
+      setTimeout(callAudioEnd, 500)
+    }
     source.start()
     tick()
   }

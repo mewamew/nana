@@ -19,7 +19,6 @@ class MainAgent:
         self.conversation_history = conversation_history
         self.llm_service = llm_service
         self.emotional_state = emotional_state
-
         soul_path = os.path.join(os.path.dirname(__file__), "prompts", "soul.md")
         reply_path = os.path.join(os.path.dirname(__file__), "prompts", "reply.md")
         with open(soul_path, "r", encoding="utf-8") as f:

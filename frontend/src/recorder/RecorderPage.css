@@ -1,0 +1,153 @@
+.recorder-page {
+  width: 100vw;
+  height: 100vh;
+  position: relative;
+  overflow: hidden;
+  background: #000;
+}
+
+/* 摄像头小窗 */
+.recorder-pip {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  width: 160px;
+  height: 120px;
+  border-radius: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  object-fit: cover;
+  transform: scaleX(-1);
+  z-index: 100;
+  background: #222;
+}
+
+/* 状态指示 */
+.recorder-status {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+  color: #fff;
+  z-index: 100;
+  backdrop-filter: blur(8px);
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.recorder-status.loading {
+  color: #ffa500;
+}
+
+.recorder-status.no-face {
+  color: #ff6b6b;
+}
+
+.recorder-status.ready {
+  color: #51cf66;
+}
+
+/* 提示文字 */
+.recorder-hint {
+  position: fixed;
+  top: 144px;
+  left: 16px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  z-index: 100;
+}
+
+/* 录制指示器 */
+.recorder-indicator {
+  position: fixed;
+  top: 60px;
+  left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 14px;
+  font-family: monospace;
+  color: #ff4444;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  z-index: 100;
+}
+
+.rec-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ff4444;
+  animation: rec-blink 1s ease-in-out infinite;
+}
+
+@keyframes rec-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.2; }
+}
+
+/* 底部控制栏 */
+.recorder-controls {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px 24px;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(12px);
+  z-index: 100;
+}
+
+.recorder-controls input[type="text"] {
+  width: 160px;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+}
+
+.recorder-controls input[type="text"]::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.recorder-controls input[type="text"]:focus {
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+.recorder-controls button {
+  padding: 8px 20px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.recorder-controls button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-record {
+  background: #ff4444;
+  color: #fff;
+}
+
+.btn-stop {
+  background: #666;
+  color: #fff;
+}
+
+.btn-export {
+  background: #51cf66;
+  color: #000;
+}

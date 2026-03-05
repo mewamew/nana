@@ -12,7 +12,10 @@ const Live2DDisplay = forwardRef((props, ref) => {
   const activeExprRef = useRef(null)
   const resetTimerRef = useRef(null)
   const mouthValueRef = useRef(0)
-
+  const trackingParamsRef = useRef(null)
+  const baseScaleRef = useRef(null)
+  const baseYRef = useRef(null)
+  const zoomRafRef = useRef(null)
   // 表情映射对象，使用中文作为 key
   const EXPRESSIONS = {
     '吐舌': 'key2',
@@ -29,6 +32,21 @@ const Live2DDisplay = forwardRef((props, ref) => {
     '爱心': 'key16',
     '泪眼': 'key17'
   }
+
+  function animateZoom(model, fromScale, toScale, fromY, toY, duration, ease) {
+    if (zoomRafRef.current) cancelAnimationFrame(zoomRafRef.current)
+    const start = performance.now()
+    function frame(now) {
+      const t = Math.min((now - start) / duration, 1)
+      const e = ease(t)
+      model.scale.set(fromScale + (toScale - fromScale) * e)
+      model.y = fromY + (toY - fromY) * e
+      if (t < 1) zoomRafRef.current = requestAnimationFrame(frame)
+    }
+    zoomRafRef.current = requestAnimationFrame(frame)
+  }
+  const easeOut = t => 1 - Math.pow(1 - t, 3)
+  const easeInOut = t => t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2
 
   // 暴露方法给父组件
   useImperativeHandle(ref, () => ({
@@ -64,13 +82,47 @@ const Live2DDisplay = forwardRef((props, ref) => {
     setTracking: (enabled) => {
       if (modelRef.current) {
         modelRef.current.autoInteract = enabled;
-        modelRef.current.internalModel.motionManager.settings.autoAddRandomMotion = enabled;
+        const state = modelRef.current.internalModel.motionManager.state;
+        state.shouldRequestIdleMotion = enabled
+          ? state.constructor.prototype.shouldRequestIdleMotion.bind(state)
+          : () => false;
         console.log(`模型跟踪功能已${enabled ? '开启' : '关闭'}~`);
       }
     },
+    setParameters: (paramMap) => {
+      trackingParamsRef.current = paramMap
+    },
     setMouthOpenY: (value) => {
       mouthValueRef.current = value
-    }
+    },
+    zoomIn: (duration = 800) => {
+      if (!modelRef.current || !baseScaleRef.current) return
+      const model = modelRef.current
+      const app = appRef.current
+      const baseScale = baseScaleRef.current
+      const newScale = baseScale * 1.15
+
+      // 脸部在模型中心上方约 30% 原始高度处（含耳朵的头顶到脚底）
+      const FACE_RATIO = 0.3
+      const origHeight = model.height / model.scale.x  // 未缩放的高度
+      const baseFaceY = baseYRef.current - origHeight * baseScale * FACE_RATIO
+      // 推镜时脸部轻微上移 1.5% 屏高，增加临场感
+      const targetFaceY = baseFaceY - app.view.height * 0.015
+      // 放大后模型中心 Y = 脸部目标 Y + 放大后的脸部偏移量
+      const newModelY = targetFaceY + origHeight * newScale * FACE_RATIO
+
+      animateZoom(model, model.scale.x, newScale, model.y, newModelY, duration, easeOut)
+    },
+    zoomOut: (duration = 1000) => {
+      if (!modelRef.current || !baseScaleRef.current) return
+      const model = modelRef.current
+      animateZoom(
+        model,
+        model.scale.x, baseScaleRef.current,
+        model.y, baseYRef.current,
+        duration, easeInOut
+      )
+    },
   }))
 
   useLayoutEffect(() => {
@@ -103,8 +155,6 @@ const Live2DDisplay = forwardRef((props, ref) => {
       if (modelRef.current) return
       
       try {
-        //const model = await Live2DModel.from('/models/Hiyori/Hiyori.model3.json')
-        //const model = await Live2DModel.from('/models/Haru/Haru.model3.json')
         const model = await Live2DModel.from('/models/PinkFox/PinkFox.model3.json')
 
         // 如果组件已经被卸载，不要继续处理
@@ -114,35 +164,53 @@ const Live2DDisplay = forwardRef((props, ref) => {
         modelRef.current = model
         
         // 设置模型的初始跟踪状态
-        model.internalModel.motionManager.settings.autoAddRandomMotion = true
-        model.autoInteract = false  // 初始状态设置为不跟踪
+        const mm = model.internalModel.motionManager
+        mm.stopAllMotions()
+        mm.state.shouldRequestIdleMotion = () => false  // 彻底阻止 idle 自动触发
+        model.autoInteract = false
         model.draggable = false
-        
+
         const scale = Math.min(
           app.view.width / model.width * 1.8,
           app.view.height / model.height * 1.8
         )
         model.scale.set(scale)
-        
+        baseScaleRef.current = scale
+        baseYRef.current = app.view.height * 0.9
+
         model.x = app.view.width / 2
         model.y = app.view.height * 0.9
         model.anchor.set(0.5, 0.5)
 
         app.stage.addChild(model)
+
+        // 鼠标左键点击播放"摇头晃脑"动作
+        app.view.addEventListener('click', () => {
+          if (!modelRef.current) return
+          modelRef.current.motion('')
+        })
+
         window.__pixiApp = app
         window.__live2dModel = model
 
-        // 在模型 update 之后、渲染之前写入口型参数，防止被 motion 覆盖
+        // 在模型 update 之后、渲染之前写入参数，防止被 idle motion 覆盖
         app.ticker.add(() => {
-          if (mouthValueRef.current > 0 && modelRef.current) {
-            modelRef.current.internalModel.coreModel
-              .setParameterValueById('ParamMouthOpenY', mouthValueRef.current)
-          }
-        })
+          if (!modelRef.current) return
+          const coreModel = modelRef.current.internalModel.coreModel
 
-        model.on('hit', (hitAreas) => {
-          console.log('Hit:', hitAreas)
-          model.motion('TapBody')
+          // 追踪参数写入
+          const tp = trackingParamsRef.current
+          if (tp) {
+            for (const [id, value] of Object.entries(tp)) {
+              coreModel.setParameterValueById(id, value)
+            }
+          }
+
+          // lip sync 口型
+          if (mouthValueRef.current > 0) {
+            coreModel.setParameterValueById('ParamMouthOpenY', mouthValueRef.current)
+          }
+
         })
       } catch (error) {
         console.error('Error loading model:', error)
@@ -152,6 +220,7 @@ const Live2DDisplay = forwardRef((props, ref) => {
     return () => {
       isDestroyed = true
       clearTimeout(resetTimerRef.current)
+      if (zoomRafRef.current) cancelAnimationFrame(zoomRafRef.current)
       if (modelRef.current) {
         modelRef.current.destroy()
         modelRef.current = null

@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^0.10.32",
     "pixi-live2d-display": "^0.4.0",
     "pixi.js": "^6.0.0",
     "react": "^18.3.1",
@@ -20,6 +21,7 @@
     "@eslint/js": "^9.17.0",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-basic-ssl": "^2.1.4",
     "@vitejs/plugin-react": "^4.3.4",
     "eslint": "^9.17.0",
     "eslint-plugin-react": "^7.37.2",

@@ -6,7 +6,13 @@
 			"PinkFox.8192/texture_00.png"
 		],
 		"Physics": "PinkFox.physics3.json",
-		"DisplayInfo": "PinkFox.cdi3.json"
+		"DisplayInfo": "PinkFox.cdi3.json",
+		"Motions": {
+			"": [
+				{ "File": "kuku.motion3.json" },
+				{ "File": "摇头晃脑.motion3.json" }
+			]
+		}
 	},
 	"Groups": [
 		{

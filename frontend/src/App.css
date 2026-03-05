@@ -66,13 +66,25 @@
     0 0 20px rgba(47, 164, 231, 0.4);
 
   transform: skew(-3deg);
+}
+
+.subtitle-text.entering {
   animation: subtitleEnter 0.5s ease-in-out;
+}
+
+.subtitle-text.leaving {
+  animation: subtitleLeave 0.5s ease-in-out forwards;
 }
 
 @keyframes subtitleEnter {
   0%   { opacity: 0; transform: translateY(20px) skew(-3deg) scale(1); }
   60%  { opacity: 1; transform: translateY(0) skew(-3deg) scale(1.05); }
   100% { opacity: 1; transform: translateY(0) skew(-3deg) scale(1); }
+}
+
+@keyframes subtitleLeave {
+  0%   { opacity: 1; transform: translateY(0) skew(-3deg) scale(1); }
+  100% { opacity: 0; transform: translateY(-10px) skew(-3deg) scale(0.97); }
 }
 
 /* 聊天界面样式 */
@@ -124,14 +136,39 @@
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
+.app .input-wrapper {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
 .app .chat-input-container .chat-input {
   flex: 1;
+  width: 100%;
   padding: 10px 15px;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(255, 255, 255, 0.1);
   color: white;
   font-size: 16px;
+  box-sizing: border-box;
+}
+
+.app .input-spinner {
+  position: absolute;
+  right: 12px;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(100, 108, 255, 0.25);
+  border-top-color: rgba(100, 108, 255, 0.85);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .app .chat-input-container .chat-input::placeholder {
@@ -141,6 +178,24 @@
 .app .chat-input-container .chat-input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.app .chat-input-container .chat-input.sent-pending:disabled {
+  opacity: 1;
+  cursor: default;
+  color: rgba(100, 108, 255, 0.85);
+  border-color: rgba(100, 108, 255, 0.35);
+  padding-right: 36px;
+}
+
+.app .chat-input-container .chat-input.sent-received:disabled {
+  opacity: 1;
+  animation: inputFadeOut 0.35s ease-out forwards;
+}
+
+@keyframes inputFadeOut {
+  from { opacity: 1; transform: translateY(0); }
+  to   { opacity: 0; transform: translateY(-4px); }
 }
 
 

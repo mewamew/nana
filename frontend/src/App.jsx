@@ -11,13 +11,29 @@ function App() {
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(false)
   const [showConfig, setShowConfig] = useState(false)
+  const [subtitleVisible, setSubtitleVisible] = useState(false)
+  const [sentStatus, setSentStatus] = useState(null) // null | 'pending' | 'received'
   const live2dRef = useRef(null)
   const abortRef = useRef(null)
   const generationRef = useRef(null)
   const pendingReplyRef = useRef('')
+  const hasExpressionRef = useRef(false)
+  const hideTimerRef = useRef(null)
+  const hasPendingInputRef = useRef(false)
+
+  function showSubtitle() {
+    setSubtitleVisible(true)
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+    hideTimerRef.current = setTimeout(() => {
+      setSubtitleVisible(false)
+    }, 5000)
+  }
   const { playWithLipSync, warmUp } = useLipSync({
     onMouthValue: (value) => {
       if (live2dRef.current) live2dRef.current.setMouthOpenY(value)
+    },
+    onAudioEnd: () => {
+      live2dRef.current?.zoomOut()
     }
   })
   const [isTracking, setIsTracking] = useState(true)
@@ -43,6 +59,11 @@ function App() {
           if (data.expression && live2dRef.current) {
             live2dRef.current.showExpression(data.expression)
           }
+          showSubtitle()
+          if (data.audio) {
+            live2dRef.current?.zoomIn()
+            playWithLipSync(data.audio)
+          }
         }
       } catch { /* 静默 */ }
     }, 30000)
@@ -62,20 +83,8 @@ function App() {
     }
     window.addEventListener('keydown', handleKeyPress)
 
-    // 测试：鼠标左键按住时嘴张开，松开时闭嘴
-    const handleMouseDown = (e) => {
-      if (e.button === 0 && live2dRef.current) live2dRef.current.setMouthOpenY(0.8)
-    }
-    const handleMouseUp = (e) => {
-      if (e.button === 0 && live2dRef.current) live2dRef.current.setMouthOpenY(0)
-    }
-    window.addEventListener('mousedown', handleMouseDown)
-    window.addEventListener('mouseup', handleMouseUp)
-
     return () => {
       window.removeEventListener('keydown', handleKeyPress)
-      window.removeEventListener('mousedown', handleMouseDown)
-      window.removeEventListener('mouseup', handleMouseUp)
     }
   }, [])
 
@@ -83,7 +92,11 @@ function App() {
     const text = directMessage ?? input
     if (!text.trim()) return
     warmUp() // 在用户手势上下文中预热 AudioContext
-    if (!directMessage) setInput('')
+    if (!directMessage) {
+      // 不立刻清空，等回复到达后淡出消失
+      setSentStatus('pending')
+      hasPendingInputRef.current = true
+    }
 
     // 取消上一个正在进行的请求
     abortRef.current?.abort()
@@ -118,8 +131,14 @@ function App() {
       },
       onExpression: (expression) => {
         if (live2dRef.current) live2dRef.current.showExpression(expression)
+        hasExpressionRef.current = true
       },
       onAudio: (audioBase64) => {
+        if (hasPendingInputRef.current) {
+          hasPendingInputRef.current = false
+          setSentStatus('received')
+          setTimeout(() => { setInput(''); setSentStatus(null) }, 350)
+        }
         if (pendingReplyRef.current) {
           const text = pendingReplyRef.current
           setMessages(prev => {
@@ -129,6 +148,12 @@ function App() {
             }
             return [...prev, { type: 'assistant', content: text }]
           })
+          showSubtitle()
+        }
+        // 只在有情绪表情时才推镜
+        if (hasExpressionRef.current) {
+          live2dRef.current?.zoomIn()
+          hasExpressionRef.current = false
         }
         playWithLipSync(audioBase64)
       },
@@ -143,11 +168,20 @@ function App() {
             return prev
           })
         }
+        // 无音频时的兜底：回复到达后清空输入框
+        if (hasPendingInputRef.current) {
+          hasPendingInputRef.current = false
+          setSentStatus('received')
+          setTimeout(() => { setInput(''); setSentStatus(null) }, 350)
+        }
         abortRef.current = null
         setLoading(false)
       },
       onError: (msg) => {
         console.error('Chat error:', msg)
+        hasPendingInputRef.current = false
+        setInput('')
+        setSentStatus(null)
         abortRef.current = null
         setLoading(false)
       },
@@ -171,7 +205,7 @@ function App() {
           {loading && !lastAssistantMessage ? (
             <div className="subtitle-text loading">...</div>
           ) : lastAssistantMessage && (
-            <div className="subtitle-text">
+            <div className={`subtitle-text ${subtitleVisible ? 'entering' : 'leaving'}`}>
               {lastAssistantMessage.content}
             </div>
           )}
@@ -184,15 +218,18 @@ function App() {
           onTranscribed={(text) => setInput(prev => prev + text)}
           onAutoSend={(text) => handleSendMessage(text)}
         />
-        <input
-          className="chat-input"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-          placeholder="输入消息..."
-          autoFocus
-          disabled={loading}
-        />
+        <div className="input-wrapper">
+          <input
+            className={`chat-input${sentStatus ? ` sent-${sentStatus}` : ''}`}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+            placeholder="输入消息..."
+            autoFocus
+            disabled={loading || sentStatus !== null}
+          />
+          {sentStatus === 'pending' && <div className="input-spinner" />}
+        </div>
       </div>
     </div>
   )

@@ -1,6 +1,6 @@
 # 14-motion-evolution — 动作自进化系统
 
-**Status: 📋 Planned**
+**Status: ❌ Removed — 效果僵硬，已彻底移除动作系统代码（motion_library.py / useMotionPlayer.js / motion_generate.md），模型切回 PinkFox。**
 
 ## 背景与目标
 

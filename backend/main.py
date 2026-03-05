@@ -22,7 +22,7 @@ heartbeat: HeartbeatSystem | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global heartbeat
-    heartbeat = HeartbeatSystem(chat_service.emotional_state)
+    heartbeat = HeartbeatSystem(chat_service.emotional_state, chat_service.conversation_history)
     task = asyncio.create_task(heartbeat.start())
     yield
     # shutdown
@@ -89,6 +89,7 @@ async def get_proactive() -> JSONResponse:
     if msg:
         return JSONResponse(content=msg)
     return JSONResponse(content={"message": None})
+
 
 
 @app.post("/api/stt")
