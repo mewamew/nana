@@ -68,7 +68,7 @@ class ChatService:
         return None
 
     async def generate_reply_stream(
-        self, message: str, session_id: str = "default"
+        self, message: str, session_id: str = "default", *, tts_enabled: bool = True
     ) -> AsyncGenerator[dict[str, str], None]:
         """流式生成回复，按事件类型 yield 字典"""
         generation_id = str(uuid.uuid4())[:8]
@@ -81,6 +81,8 @@ class ChatService:
                 return
 
             yield {"type": "generation_id", "content": generation_id}
+
+            print(f"[Chat] 用户: {message}")
 
             chunks: list[str] = []
             expression_sent = False
@@ -99,20 +101,23 @@ class ChatService:
                         expression_sent = True
                         yield {"type": "expression", "content": expression}
 
+            full_text = "".join(chunks)
+            reply_text = self.main_agent.extract_reply_text(full_text)
+            print(f"[Chat] AI: {reply_text}")
+
             if not expression_sent:
-                full_text = "".join(chunks)
                 expression = self.main_agent.extract_expression(full_text)
                 if expression:
                     yield {"type": "expression", "content": expression}
 
-            try:
-                tts = get_tts()
-                if tts.is_configured():
-                    full_text = "".join(chunks)
-                    clean_text = self.main_agent.extract_reply_text(full_text)
-                    audio_bytes = await tts.synthesize(clean_text)
-                    if audio_bytes:
-                        audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
-                        yield {"type": "audio", "content": audio_b64}
-            except NotImplementedError:
-                pass
+            if tts_enabled:
+                try:
+                    tts = get_tts()
+                    if tts.is_configured():
+                        clean_text = reply_text
+                        audio_bytes = await tts.synthesize(clean_text)
+                        if audio_bytes:
+                            audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+                            yield {"type": "audio", "content": audio_b64}
+                except NotImplementedError:
+                    pass

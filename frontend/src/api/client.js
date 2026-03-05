@@ -5,7 +5,7 @@ export const api = {
    * SSE 流式对话
    * callbacks: { onText, onExpression, onAudio, onDone, onError }
    */
-  chatStream(message, callbacks = {}, options = {}) {
+  chatStream(message, ttsEnabled = true, callbacks = {}, options = {}) {
     const { onText, onExpression, onAudio, onDone, onError, onGenerationId } = callbacks
     const { signal } = options
 
@@ -13,7 +13,7 @@ export const api = {
       const response = await fetch(`${BASE_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, session_id: "default" }),
+        body: JSON.stringify({ message, session_id: "default", tts_enabled: ttsEnabled }),
         signal,
       })
 

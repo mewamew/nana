@@ -52,9 +52,10 @@ const BASE_URL = "http://localhost:8000"
 
 export const api = {
   // SSE 流式对话
-  chatStream(message, callbacks) {
+  chatStream(message, ttsEnabled = true, callbacks) {
     // callbacks: { onText, onExpression, onAudio, onDone, onError }
     // 使用 fetch + ReadableStream 解析 SSE
+    // 请求 body 中传递 tts_enabled 字段
   },
 
   // 语音识别
@@ -94,8 +95,12 @@ export const api = {
 
 **状态调整：**
 ```javascript
-const [showConfig, setShowConfig] = useState(false)  // 新增：控制配置面板显示
-const [isRecording, setIsRecording] = useState(false) // 新增：录音状态
+const [showConfig, setShowConfig] = useState(false)  // 控制配置面板显示
+const [isRecording, setIsRecording] = useState(false) // 录音状态
+const [ttsEnabled, setTtsEnabled] = useState(() => {  // TTS 开关（localStorage 持久化）
+  const saved = localStorage.getItem('ttsEnabled')
+  return saved !== null ? JSON.parse(saved) : true
+})
 ```
 
 **`handleSendMessage` 改造（SSE 版本）：**
@@ -112,7 +117,7 @@ const handleSendMessage = async () => {
 
   let assistantText = ""
 
-  api.chatStream(userMessage, {
+  api.chatStream(userMessage, ttsEnabled, {
     onText: (chunk) => {
       // 解析 JSON 中的 reply 字段（逐步累积）
       assistantText += chunk
@@ -131,7 +136,7 @@ const handleSendMessage = async () => {
       if (live2dRef.current) live2dRef.current.showExpression(expression)
     },
     onAudio: (audioBase64) => {
-      playAudio(audioBase64)
+      if (ttsEnabled) playAudio(audioBase64)  // TTS 关闭时跳过播放
     },
     onDone: () => {
       setLoading(false)
@@ -177,13 +182,15 @@ return (
       <div className="subtitles">...</div>
     </div>
 
-    {/* 输入区域：加入语音按钮 */}
+    {/* 输入区域：语音按钮 + 输入框 + TTS 开关 */}
     <div className="chat-input-container">
       <VoiceInput
         onTranscribed={(text) => setInput(prev => prev + text)}
       />
       <input ... />
-      <button onClick={handleSendMessage}>发送</button>
+      <button className={`tts-toggle${ttsEnabled ? '' : ' off'}`} onClick={toggleTts}>
+        {ttsEnabled ? '🔊' : '🔇'}
+      </button>
     </div>
   </div>
 )
@@ -269,6 +276,13 @@ function VoiceInput({ onTranscribed }) {
 - 在输入框左侧
 - 录音时变红色 + 轻微跳动动画
 - 识别完成后文字自动填入输入框
+
+**TTS 开关按钮**：
+- 在输入框右侧，42x42 圆形按钮，与配置按钮风格一致
+- 开启状态：🔊 图标，正常透明度
+- 关闭状态：🔇 图标，降低透明度（`.tts-toggle.off`）
+- 状态通过 `localStorage('ttsEnabled')` 持久化
+- TTS 关闭时：后端跳过 TTS 合成，前端跳过 `playWithLipSync()`
 
 **字幕流式效果**：
 - 文字逐渐出现，有 0.1s 的 fade-in 过渡

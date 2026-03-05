@@ -59,13 +59,14 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = "default"
+    tts_enabled: Optional[bool] = True
 
 
 @app.post("/api/chat")
 async def chat(request: ChatRequest) -> StreamingResponse:
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
-            async for event in chat_service.generate_reply_stream(request.message, request.session_id or "default"):
+            async for event in chat_service.generate_reply_stream(request.message, request.session_id or "default", tts_enabled=request.tts_enabled):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as e:
             error_event = {"type": "error", "content": str(e)}

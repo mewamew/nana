@@ -58,11 +58,20 @@ data: {"type": "error",      "content": "错误信息"}
 from fastapi.responses import StreamingResponse
 import json
 
+class ChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = "default"
+    tts_enabled: Optional[bool] = True  # 前端 TTS 开关，False 时跳过 TTS 合成
+
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
     async def event_stream():
         try:
-            async for event in chat_service.generate_reply_stream(request.message):
+            async for event in chat_service.generate_reply_stream(
+                request.message,
+                request.session_id or "default",
+                tts_enabled=request.tts_enabled,
+            ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as e:
             error_event = {"type": "error", "content": str(e)}
@@ -99,7 +108,9 @@ async def update_config(body: dict):
 将 `generate_reply()` 改为 `generate_reply_stream()`，返回 `AsyncGenerator`：
 
 ```python
-async def generate_reply_stream(self, message: str) -> AsyncGenerator[dict, None]:
+async def generate_reply_stream(
+    self, message: str, session_id: str = "default", *, tts_enabled: bool = True
+) -> AsyncGenerator[dict, None]:
     """
     流式生成回复，按事件类型 yield 字典
     """
@@ -116,15 +127,16 @@ async def generate_reply_stream(self, message: str) -> AsyncGenerator[dict, None
     if expression:
         yield {"type": "expression", "content": expression}
 
-    # 3. 合成语音（如果 TTS 已配置）
-    tts = get_tts()
-    if tts.is_configured():
-        clean_text = main_agent.extract_reply_text(full_text)
-        audio_bytes = await tts.synthesize(clean_text)
-        if audio_bytes:
-            import base64
-            audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
-            yield {"type": "audio", "content": audio_b64}
+    # 3. 合成语音（如果 TTS 已配置且前端启用）
+    if tts_enabled:
+        tts = get_tts()
+        if tts.is_configured():
+            clean_text = main_agent.extract_reply_text(full_text)
+            audio_bytes = await tts.synthesize(clean_text)
+            if audio_bytes:
+                import base64
+                audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+                yield {"type": "audio", "content": audio_b64}
 ```
 
 ### `main_agent.py` 改造

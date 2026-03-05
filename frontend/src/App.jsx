@@ -13,6 +13,10 @@ function App() {
   const [showConfig, setShowConfig] = useState(false)
   const [subtitleVisible, setSubtitleVisible] = useState(false)
   const [sentStatus, setSentStatus] = useState(null) // null | 'pending' | 'received'
+  const [ttsEnabled, setTtsEnabled] = useState(() => {
+    const saved = localStorage.getItem('ttsEnabled')
+    return saved !== null ? JSON.parse(saved) : true
+  })
   const live2dRef = useRef(null)
   const abortRef = useRef(null)
   const generationRef = useRef(null)
@@ -20,6 +24,16 @@ function App() {
   const hasExpressionRef = useRef(false)
   const hideTimerRef = useRef(null)
   const hasPendingInputRef = useRef(false)
+  const ttsEnabledRef = useRef(ttsEnabled)
+
+  const toggleTts = () => {
+    setTtsEnabled(prev => {
+      const next = !prev
+      ttsEnabledRef.current = next
+      localStorage.setItem('ttsEnabled', JSON.stringify(next))
+      return next
+    })
+  }
 
   function showSubtitle() {
     setSubtitleVisible(true)
@@ -60,7 +74,7 @@ function App() {
             live2dRef.current.showExpression(data.expression)
           }
           showSubtitle()
-          if (data.audio) {
+          if (data.audio && ttsEnabledRef.current) {
             live2dRef.current?.zoomIn()
             playWithLipSync(data.audio)
           }
@@ -120,7 +134,7 @@ function App() {
       }
     }
 
-    api.chatStream(text, {
+    api.chatStream(text, ttsEnabledRef.current, {
       onGenerationId: (id) => {
         generationRef.current = id
       },
@@ -155,18 +169,21 @@ function App() {
           live2dRef.current?.zoomIn()
           hasExpressionRef.current = false
         }
-        playWithLipSync(audioBase64)
+        if (ttsEnabledRef.current) {
+          playWithLipSync(audioBase64)
+        }
       },
       onDone: () => {
         if (rawAccumulator) {
+          const finalText = pendingReplyRef.current || extractReply(rawAccumulator) || rawAccumulator
           setMessages(prev => {
             const last = prev[prev.length - 1]
-            if (last?.type !== 'assistant') {
-              const fallback = extractReply(rawAccumulator) ?? rawAccumulator
-              return [...prev, { type: 'assistant', content: fallback }]
+            if (last?.type === 'assistant') {
+              return [...prev.slice(0, -1), { type: 'assistant', content: finalText }]
             }
-            return prev
+            return [...prev, { type: 'assistant', content: finalText }]
           })
+          showSubtitle()
         }
         // 无音频时的兜底：回复到达后清空输入框
         if (hasPendingInputRef.current) {
@@ -230,6 +247,13 @@ function App() {
           />
           {sentStatus === 'pending' && <div className="input-spinner" />}
         </div>
+        <button
+          className={`tts-toggle${ttsEnabled ? '' : ' off'}`}
+          onClick={toggleTts}
+          title={ttsEnabled ? 'TTS 开启' : 'TTS 关闭'}
+        >
+          {ttsEnabled ? '🔊' : '🔇'}
+        </button>
       </div>
     </div>
   )

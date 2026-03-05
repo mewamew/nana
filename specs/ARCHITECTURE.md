@@ -11,13 +11,17 @@ Nana 是一个二次元 AI 伴侣应用，包含：
 - **前端**：React + Vite，展示 Live2D 角色、对话字幕、配置界面
 
 核心功能：
-1. 支持多家 LLM（国产为主，兼容国外和本地）
-2. 支持多家 TTS（Fish Audio + 本地 Qwen3 TTS）
-3. 支持多家 STT（本地 Whisper + Qwen3-ASR-Flash）
-4. 升级记忆系统（LLM 摘要归档，JSON 存储）
-5. 配置 UI 化（前端可视化配置所有 Provider）
-6. 后端流式输出（SSE）
-7. Agentic Loop（工具调用：时间查询、记忆搜索）
+1. 多 LLM 支持（DeepSeek / Qwen / Doubao / GLM / MiniMax / OpenAI / Claude / Ollama / LMStudio）
+2. 多 TTS 支持（Fish Audio / 本地 Qwen3 TTS）
+3. 多 STT 支持（本地 Whisper / Qwen3-ASR）
+4. 三层记忆系统（热/温/冷，LLM 摘要归档）
+5. 配置 UI（前端可视化配置所有 Provider）
+6. SSE 流式输出（text / expression / audio / motion 事件）
+7. Agentic Loop（工具调用：时间查询、记忆搜索、技能调用）
+8. 心跳系统（60s tick + LLM 决策 + 注意力管理，主动发消息）
+9. Skill 插件系统（可插拔能力扩展，当前：天气查询）
+10. 对话持久化（SQLite，重启恢复历史）
+11. 真人动捕动作（MediaPipe → motion3.json 录制 + 回放）
 
 ---
 
@@ -50,7 +54,7 @@ nana/
 │   │   ├── __init__.py           # 导出 get_llm / get_tts / get_stt 工厂函数
 │   │   ├── llm/
 │   │   │   ├── base.py           # BaseLLMProvider
-│   │   │   ├── openai_compatible.py  # 覆盖 8 家 OpenAI 兼容服务
+│   │   │   ├── openai_compatible.py  # 覆盖 9 家 OpenAI 兼容服务
 │   │   │   └── anthropic.py      # Claude 专用实现
 │   │   ├── tts/
 │   │   │   ├── base.py           # BaseTTSProvider
@@ -60,24 +64,36 @@ nana/
 │   │       ├── base.py           # BaseSTTProvider
 │   │       ├── whisper_local.py
 │   │       └── qwen3_asr.py
+│   ├── skills/                   # Skill 插件目录
+│   │   └── weather/              # 天气查询 skill
+│   │       ├── SKILL.md
+│   │       ├── tool.py
+│   │       └── requirements.txt
+│   ├── prompts/
+│   │   ├── soul.md               # 角色人设（不得修改）
+│   │   ├── reply.md              # 回复指令 Prompt
+│   │   ├── heartbeat.md          # 心跳 LLM 决策 Prompt
+│   │   ├── memory_extract.md     # 记忆提取 Prompt
+│   │   └── tool_decision.md      # 工具决策 Prompt
 │   ├── config_manager.py         # config.json 读写，热重载
 │   ├── main.py                   # FastAPI 入口，路由定义
 │   ├── chat_service.py           # 对话流程编排（调用 LLM/TTS）
 │   ├── main_agent.py             # AI Agent 核心逻辑（含 Agentic Loop）
-│   ├── conversation.py           # 记忆管理（JSON 文件存储）
-│   ├── emotional_state.py        # 情绪状态持久化 + 关系阶段 + 交互回调
+│   ├── conversation.py           # 记忆管理（三层 + LLM 摘要归档）
+│   ├── database.py               # SQLite 对话持久化
+│   ├── emotional_state.py        # 情绪状态 + 关系阶段 + 交互回调
 │   ├── heartbeat.py              # 心跳系统（60s tick + LLM 决策 + 注意力管理）
+│   ├── skill_manager.py          # Skill 插件加载器
 │   ├── tools.py                  # 工具定义与执行器
-│   └── prompts/
-│       ├── soul.md               # 角色人设
-│       ├── reply.md              # 回复指令 Prompt
-│       ├── heartbeat.md          # 心跳 LLM 决策 Prompt
-│       ├── memory_extract.md     # 记忆提取 Prompt
-│       └── tool_decision.md      # 工具决策 Prompt
+│   ├── embedding_utils.py        # 向量嵌入 + 余弦相似度
+│   ├── tts.py                    # TTS 辅助（文本分块等）
+│   ├── diary.py                  # 日记系统
+│   └── utils.py                  # 通用工具函数
 │
 ├── frontend/
 │   └── src/
 │       ├── App.jsx
+│       ├── main.jsx
 │       ├── components/
 │       │   ├── Live2DModel.jsx   # PinkFox 模型渲染 + 表情/口型
 │       │   ├── ConfigPanel.jsx   # 配置 UI
@@ -85,6 +101,13 @@ nana/
 │       │   └── LoadingDots.jsx
 │       ├── hooks/
 │       │   └── useLipSync.js     # lip sync hook（音频驱动口型）
+│       ├── recorder/             # 动捕录制工具（开发工具，#recorder 进入）
+│       │   ├── RecorderPage.jsx
+│       │   ├── useFaceTracking.js
+│       │   ├── motion3Export.js
+│       │   └── blendshapeMapping.js
+│       ├── debug/                # 调试页面（#debug 进入）
+│       │   └── DebugPage.jsx
 │       └── api/
 │           └── client.js         # 统一 API 请求封装
 │
@@ -147,12 +170,7 @@ nana/
 ```python
 # backend/providers/llm/base.py
 
-from abc import ABC, abstractmethod
-from typing import AsyncGenerator
-
 class BaseLLMProvider(ABC):
-    """所有 LLM Provider 必须实现此接口"""
-
     @abstractmethod
     async def chat_stream(
         self,
@@ -160,18 +178,9 @@ class BaseLLMProvider(ABC):
         temperature: float = 0.7
     ) -> AsyncGenerator[str, None]:
         """流式生成，逐步 yield 文本片段（token 级别）"""
-        ...
 
-    async def chat(
-        self,
-        messages: list[dict],
-        temperature: float = 0.7
-    ) -> str:
-        """非流式调用，默认实现为聚合 chat_stream"""
-        result = []
-        async for chunk in self.chat_stream(messages, temperature):
-            result.append(chunk)
-        return "".join(result)
+    async def chat(self, messages: list[dict], temperature: float = 0.7) -> str:
+        """非流式调用，默认实现：聚合 chat_stream() 结果"""
 ```
 
 ### 5.2 TTS Provider
@@ -219,36 +228,12 @@ class BaseSTTProvider(ABC):
 ```python
 # backend/providers/__init__.py
 
-from config_manager import ConfigManager
-from providers.llm.openai_compatible import OpenAICompatibleProvider
-from providers.llm.anthropic import AnthropicProvider
-from providers.tts.fish_audio import FishAudioProvider
-from providers.tts.qwen3_tts import Qwen3TTSProvider
-from providers.stt.whisper_local import WhisperLocalProvider
-from providers.stt.qwen3_asr import Qwen3ASRProvider
-
-def get_llm() -> BaseLLMProvider:
-    cfg = ConfigManager.get_llm_config()
-    if cfg["active"] == "claude":
-        return AnthropicProvider(cfg["providers"]["claude"])
-    return OpenAICompatibleProvider(cfg["active"], cfg["providers"][cfg["active"]])
-
-def get_tts() -> BaseTTSProvider:
-    cfg = ConfigManager.get_tts_config()
-    providers = {
-        "fish_audio": FishAudioProvider,
-        "qwen3_tts": Qwen3TTSProvider,
-    }
-    return providers[cfg["active"]](cfg["providers"][cfg["active"]])
-
-def get_stt() -> BaseSTTProvider:
-    cfg = ConfigManager.get_stt_config()
-    providers = {
-        "whisper_local": WhisperLocalProvider,
-        "qwen3_asr": Qwen3ASRProvider,
-    }
-    return providers[cfg["active"]](cfg["providers"][cfg["active"]])
+def get_llm() -> BaseLLMProvider: ...   # 读取 ConfigManager，返回当前激活的 LLM Provider
+def get_tts() -> BaseTTSProvider: ...   # 读取 ConfigManager，返回当前激活的 TTS Provider
+def get_stt() -> BaseSTTProvider: ...   # 读取 ConfigManager，返回当前激活的 STT Provider
 ```
+
+**规则**：每次调用都重新读取 `ConfigManager`（不缓存），保证配置变更后立即生效（热重载）。`active` 不在注册表中时抛出 `ValueError`。
 
 ---
 
@@ -275,7 +260,7 @@ data: {"type": "error",      "content": "LLM 服务暂时不可用"}
 1. `generation_id` 事件标识本次生成（1个）
 2. `text` 事件在 LLM 生成时实时发送（多个）
 3. `expression` 事件在 LLM 完整回复解析后发送（1个）
-4. `audio` 事件在 TTS 合成完成后发送（0或1个，取决于 TTS 是否启用）
+4. `audio` 事件在 TTS 合成完成后发送（0或1个，取决于 TTS 是否配置且 `tts_enabled=true`）
 5. `done` 事件最后发送
 
 ---
@@ -293,8 +278,14 @@ data: {"type": "error",      "content": "LLM 服务暂时不可用"}
 
 ### `/api/chat` 请求体
 ```json
-{ "message": "你好" }
+{ "message": "你好", "tts_enabled": true }
 ```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `message` | string | (必填) | 用户消息 |
+| `session_id` | string | `"default"` | 会话 ID |
+| `tts_enabled` | bool | `true` | 是否启用 TTS 合成，`false` 时跳过 TTS 不返回 `audio` 事件 |
 
 ### `/api/stt` 请求体
 ```
