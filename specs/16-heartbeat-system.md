@@ -1,4 +1,4 @@
-# 16 — 心跳系统：60s tick + LLM 决策 + 注意力管理
+# 16 — 心跳系统：60s tick + LLM 决策 + 注意力管理 `[需要测试]`
 
 ## 概述
 
@@ -173,7 +173,12 @@ for cb in self._interaction_callbacks:
 
 前端轮询此接口获取主动消息。
 
-**有消息时：**
+**有消息时（含语音）：**
+```json
+{"message": "哼，你怎么还不来找我说话", "expression": "嘟嘴", "audio": "<base64>"}
+```
+
+**有消息时（TTS 失败/未配置，无语音）：**
 ```json
 {"message": "哼，你怎么还不来找我说话", "expression": "嘟嘴"}
 ```
@@ -183,7 +188,31 @@ for cb in self._interaction_callbacks:
 {"message": null}
 ```
 
-接口行为不变，前端无需改动。
+---
+
+## 主动消息语音（TTS + 口型同步 + 推镜）
+
+主动消息和正常聊天效果一致：文字 + 表情 + TTS 语音 + 口型同步 + 字幕 + 推镜。
+
+### 后端流程
+
+`_llm_decide_and_generate()` 中，LLM 返回 `send_message` 后，调用 TTS 合成语音，将 base64 音频附加到 `result["audio"]`。TTS 失败时静默降级（只有文字+表情，无语音）。
+
+### 前端流程
+
+前端轮询 `/api/proactive` 收到主动消息时：
+1. 添加消息到聊天记录
+2. 切换 Live2D 表情
+3. 显示字幕（`showSubtitle()`，5 秒后淡出）
+4. 若有 `audio`：推镜（`zoomIn`）+ 播放语音并口型同步（`playWithLipSync`）
+5. 语音播放结束后自动回镜（`zoomOut`，由 `useLipSync.onAudioEnd` 回调处理）
+
+### 涉及文件
+
+| 文件 | 改动 |
+|------|------|
+| `backend/heartbeat.py` | `_llm_decide_and_generate` 中调 TTS，附加 `audio` 字段 |
+| `frontend/src/App.jsx` | 轮询处理增加 `playWithLipSync` + `showSubtitle` + `zoomIn` |
 
 ---
 

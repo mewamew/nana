@@ -2,15 +2,19 @@ import json
 import os
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any, AsyncGenerator, Tuple
 
 from conversation import ConversationHistory
 from emotional_state import EmotionalState
 from providers import get_llm
+from skill_manager import SkillManager
 from tools import ToolExecutor, render_tool_definitions
 from utils import parse_llm_json
 
 MAX_TOOL_CALLS = 3
+
+_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 
 
 class MainAgent:
@@ -30,6 +34,10 @@ class MainAgent:
         decision_path = os.path.join(os.path.dirname(__file__), "prompts", "tool_decision.md")
         with open(decision_path, "r", encoding="utf-8") as f:
             self.decision_template = f.read()
+
+        # 初始化 SkillManager
+        skills_dir = Path(__file__).parent / "skills"
+        self.skill_manager = SkillManager(str(skills_dir)) if skills_dir.exists() else None
 
         # 确保日志目录存在
         self.log_dir = os.path.join(os.path.dirname(__file__), '..', 'save', 'log')
@@ -122,7 +130,9 @@ class MainAgent:
     async def reply_stream(self, message: str) -> AsyncGenerator[str, None]:
         """流式生成原始 LLM 输出（JSON 格式的字符串片段）"""
         self._log_conversation("user", message)
+
         tool_results_text = await self._run_tool_loop(message)
+
         memory_text = self._get_relevant_memories(message)
         context = self.conversation_history.get_context()
 
@@ -131,11 +141,18 @@ class MainAgent:
             user_message=message,
             memory=memory_text,
             tool_results=tool_results_text,
+            current_datetime=self._get_current_datetime(),
             user_info=self.conversation_history.format_profile(),
             mood_state=self.emotional_state.get_mood_description(),
             time_context=self.emotional_state.get_time_context(),
             relationship_context=self.emotional_state.get_relationship_description(),
         )
+
+        # 注入 skills_prompt（在 format() 之后，避免花括号冲突）
+        if self.skill_manager:
+            skills_content = self.skill_manager.build_skills_prompt()
+            if skills_content:
+                prompt += "\n\n## 可用技能\n" + skills_content
 
         messages = [{"role": "user", "content": prompt}]
         llm = get_llm()
@@ -207,6 +224,7 @@ class MainAgent:
             user_message=message,
             memory=memory_text,
             tool_results=tool_results,
+            current_datetime=self._get_current_datetime(),
             user_info=self.conversation_history.format_profile(),
             mood_state=self.emotional_state.get_mood_description(),
             time_context=self.emotional_state.get_time_context(),
@@ -226,6 +244,11 @@ class MainAgent:
         self.emotional_state.record_interaction()
 
         return reply.get("reply", ""), reply.get("expression", "")
+
+    def _get_current_datetime(self) -> str:
+        now = datetime.now()
+        weekday = _WEEKDAYS[now.weekday()]
+        return now.strftime(f"%Y年%m月%d日 {weekday} %H:%M")
 
     def _get_relevant_memories(self, message: str) -> str:
         current_emotion = self.emotional_state.state["mood"].get("dominant_emotion")

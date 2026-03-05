@@ -12,11 +12,11 @@
 {previous_tool_results}
 
 判断规则：
-- 用户询问时间、日期、星期几 → 调用 get_datetime
-- 用户询问以前聊过的内容、历史记忆 → 调用 search_memory
-- 其他情况 → 直接回复，不调用工具
+- 仔细阅读上方"可用工具"列表，每个工具的描述已说明适用场景
+- 如果用户的需求与某个工具的描述匹配，则调用该工具
+- 如果已有工具结果中已包含所需信息，不要重复调用同一工具
+- 没有合适工具时，直接回复，不调用工具
 
-必须且仅输出以下 JSON 格式之一：
-{{"action": "call_tool", "tool": "get_datetime", "args": {{}}}}
-{{"action": "call_tool", "tool": "search_memory", "args": {{"query": "关键词"}}}}
+必须且仅输出以下 JSON 格式之一（严格 JSON，不要加说明文字）：
+{{"action": "call_tool", "tool": "<工具名>", "args": {{<参数键值对>}}}}
 {{"action": "reply_directly"}}

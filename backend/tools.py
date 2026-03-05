@@ -1,23 +1,28 @@
-from datetime import datetime
-from typing import TYPE_CHECKING
+import asyncio
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from conversation import ConversationHistory
 
+_dynamic_tool_funcs: dict[str, Callable] = {}
+
+
+def register_tool(name: str, func: Callable, description: str, parameters: dict = None):
+    TOOL_DEFINITIONS.append({
+        "name": name,
+        "description": description,
+        "parameters": parameters or {}
+    })
+    _dynamic_tool_funcs[name] = func
+
+
 TOOL_DEFINITIONS = [
-    {
-        "name": "get_datetime",
-        "description": "获取当前的日期和时间。用户询问时间、日期、星期几时使用。",
-        "parameters": {},
-    },
     {
         "name": "search_memory",
         "description": "在长期记忆中搜索相关历史信息。需要回忆以前对话时使用。",
         "parameters": {"query": "搜索关键词"},
     },
 ]
-
-_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 
 
 def render_tool_definitions() -> str:
@@ -35,18 +40,16 @@ class ToolExecutor:
         self.conversation_history = conversation_history
 
     async def execute(self, tool_name: str, args: dict) -> str:
-        if tool_name == "get_datetime":
-            return self._get_datetime()
-        elif tool_name == "search_memory":
+        if tool_name == "search_memory":
             query = args.get("query", "")
             return self._search_memory(query)
+        elif tool_name in _dynamic_tool_funcs:
+            func = _dynamic_tool_funcs[tool_name]
+            if asyncio.iscoroutinefunction(func):
+                return str(await func(**args))
+            return str(func(**args))
         else:
             return f"[错误] 未知工具: {tool_name}"
-
-    def _get_datetime(self) -> str:
-        now = datetime.now()
-        weekday = _WEEKDAYS[now.weekday()]
-        return now.strftime(f"%Y年%m月%d日 {weekday} %H:%M:%S")
 
     def _search_memory(self, query: str) -> str:
         if not query:
