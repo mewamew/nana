@@ -38,6 +38,16 @@ class Database:
             )
             conn.commit()
 
+    def save_message(self, role: str, content: str, session_id: str = "default"):
+        """保存单条消息（心跳等非配对消息）"""
+        now = datetime.now().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                (session_id, role, content, now),
+            )
+            conn.commit()
+
     def get_recent_dialogs(self, n: int = 20, session_id: str = "default") -> list[tuple[str, str]]:
         """返回最近 N 轮对话 [(user_msg, assistant_msg), ...]"""
         with sqlite3.connect(self.db_path) as conn:

@@ -13,6 +13,7 @@ function App() {
   const [showConfig, setShowConfig] = useState(false)
   const [subtitleVisible, setSubtitleVisible] = useState(false)
   const [sentStatus, setSentStatus] = useState(null) // null | 'pending' | 'received'
+  const [initialized, setInitialized] = useState(null) // null=加载中, false=未初始化, true=已初始化
   const [ttsEnabled, setTtsEnabled] = useState(() => {
     const saved = localStorage.getItem('ttsEnabled')
     return saved !== null ? JSON.parse(saved) : true
@@ -52,6 +53,13 @@ function App() {
   })
   const [isTracking, setIsTracking] = useState(true)
 
+  // 启动时检测初始化状态
+  useEffect(() => {
+    api.getStatus().then(status => {
+      setInitialized(status.initialized)
+    }).catch(() => setInitialized(false))
+  }, [])
+
   // 启动时从后端加载历史消息
   useEffect(() => {
     api.getHistory().then((history) => {
@@ -63,13 +71,14 @@ function App() {
     })
   }, [])
 
-  // 轮询主动消息
+  // 轮询主动消息（仅在已初始化时启动）
   useEffect(() => {
+    if (!initialized) return
     const timer = setInterval(async () => {
       try {
         const data = await api.getProactive()
         if (data.message) {
-          setMessages(prev => [...prev, { type: 'assistant', content: data.message }])
+          setMessages(prev => [...prev, { type: 'assistant', content: data.message, source: 'heartbeat' }])
           if (data.expression && live2dRef.current) {
             live2dRef.current.showExpression(data.expression)
           }
@@ -82,7 +91,7 @@ function App() {
       } catch { /* 静默 */ }
     }, 30000)
     return () => clearInterval(timer)
-  }, [])
+  }, [initialized])
 
   useEffect(() => {
     const handleKeyPress = (e) => {
@@ -137,6 +146,7 @@ function App() {
     api.chatStream(text, ttsEnabledRef.current, {
       onGenerationId: (id) => {
         generationRef.current = id
+        setMessages(prev => [...prev, { type: 'assistant', content: '', generationId: id }])
       },
       onText: (chunk) => {
         rawAccumulator += chunk
@@ -155,13 +165,10 @@ function App() {
         }
         if (pendingReplyRef.current) {
           const text = pendingReplyRef.current
-          setMessages(prev => {
-            const last = prev[prev.length - 1]
-            if (last?.type === 'assistant') {
-              return [...prev.slice(0, -1), { type: 'assistant', content: text }]
-            }
-            return [...prev, { type: 'assistant', content: text }]
-          })
+          const gid = generationRef.current
+          setMessages(prev => prev.map(m =>
+            m.generationId === gid ? { ...m, content: text } : m
+          ))
           showSubtitle()
         }
         // 只在有情绪表情时才推镜
@@ -173,13 +180,17 @@ function App() {
           playWithLipSync(audioBase64)
         }
       },
+      onInitComplete: (persona) => {
+        setInitialized(true)
+      },
       onDone: () => {
         if (rawAccumulator) {
           const finalText = pendingReplyRef.current || extractReply(rawAccumulator) || rawAccumulator
+          const gid = generationRef.current
           setMessages(prev => {
-            const last = prev[prev.length - 1]
-            if (last?.type === 'assistant') {
-              return [...prev.slice(0, -1), { type: 'assistant', content: finalText }]
+            const has = prev.some(m => m.generationId === gid)
+            if (has) {
+              return prev.map(m => m.generationId === gid ? { ...m, content: finalText } : m)
             }
             return [...prev, { type: 'assistant', content: finalText }]
           })
@@ -210,7 +221,7 @@ function App() {
   return (
     <div className="app">
       {/* 右上角配置按钮 */}
-      <button className="config-btn" onClick={() => setShowConfig(true)} title="设置">⚙</button>
+      {initialized && <button className="config-btn" onClick={() => setShowConfig(true)} title="设置">⚙</button>}
 
       {/* 配置面板 */}
       {showConfig && <ConfigPanel onClose={() => setShowConfig(false)} />}
@@ -241,7 +252,7 @@ function App() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-            placeholder="输入消息..."
+            placeholder={initialized ? "输入消息..." : "说点什么吧..."}
             autoFocus
             disabled={loading || sentStatus !== null}
           />

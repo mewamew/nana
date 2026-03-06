@@ -71,6 +71,10 @@ class EmotionalState:
             "date": "",
             "interactions_today": 0,
         },
+        "heartbeat": {
+            "response_rate": 0.0,
+            "last_proactive": "",
+        },
     }
 
     def __init__(self):
@@ -304,6 +308,15 @@ class EmotionalState:
                 cb()
             except Exception:
                 pass
+
+    def get_heartbeat_state(self) -> dict:
+        return self.state.get("heartbeat", self.DEFAULT_STATE["heartbeat"])
+
+    def save_heartbeat_state(self, response_rate: float, last_proactive: str):
+        self.state.setdefault("heartbeat", {})
+        self.state["heartbeat"]["response_rate"] = response_rate
+        self.state["heartbeat"]["last_proactive"] = last_proactive
+        self._save()
 
     def _check_stage_upgrade(self) -> None:
         """检查是否满足升级条件（三项阈值全部达标才升级）"""

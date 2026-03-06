@@ -14,7 +14,12 @@ class ConversationTurn:
         self.answer = answer
 
     def __str__(self):
-        return f"user: {self.ask}\nassistant: {self.answer}"
+        parts = []
+        if self.ask:
+            parts.append(f"user: {self.ask}")
+        if self.answer:
+            parts.append(f"assistant: {self.answer}")
+        return "\n".join(parts)
 
 
 class ConversationHistory:
@@ -270,9 +275,40 @@ class ConversationHistory:
         except Exception as e:
             print(f"[Memory] 生成 embedding 失败，跳过: {e}")
 
+    async def add_message(self, role: str, content: str):
+        """添加单条消息（如心跳主动消息），不要求配对"""
+        if role == "assistant":
+            turn = ConversationTurn("", content)
+        else:
+            turn = ConversationTurn(content, "")
+        self.turns.append(turn)
+        if self.db:
+            try:
+                self.db.save_message(role, content)
+            except Exception as e:
+                print(f"[Memory] 写入单条消息失败: {e}")
+        if len(self.turns) >= self.max_turns:
+            await self._auto_archive()
+
     def get_context(self) -> str:
         """获取格式化后的对话上下文"""
-        return "\n".join(str(turn) for turn in self.turns)
+        parts = []
+        for turn in self.turns:
+            if turn.ask:
+                parts.append(f"user: {turn.ask}")
+            if turn.answer:
+                parts.append(f"assistant: {turn.answer}")
+        return "\n".join(parts)
+
+    def get_recent_context(self, n: int = 10) -> str:
+        """获取最近 N 条消息的上下文（按消息条数截取，不按字符）"""
+        parts = []
+        for turn in self.turns:
+            if turn.ask:
+                parts.append(f"user: {turn.ask}")
+            if turn.answer:
+                parts.append(f"assistant: {turn.answer}")
+        return "\n".join(parts[-n:]) if parts else ""
 
     async def retrieve_async(self, user_message: str, n_results: int = 3) -> List[str]:
         """异步检索：有 embedding 时用向量匹配，否则降级为关键词匹配"""
