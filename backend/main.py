@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from chat_service import ChatService
 from config_manager import ConfigManager
 from heartbeat import HeartbeatSystem
+from persona import load_persona
 from providers import get_llm, get_stt
 
 chat_service = ChatService()
@@ -82,6 +83,18 @@ async def chat(request: ChatRequest) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/api/status")
+async def get_status() -> JSONResponse:
+    persona = load_persona()
+    return JSONResponse(content={
+        "initialized": persona is not None,
+        "persona": {
+            "char_name": persona["char_name"],
+            "user_name": persona["user_name"],
+        } if persona else None,
+    })
 
 
 @app.get("/api/proactive")

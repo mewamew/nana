@@ -1,9 +1,16 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import Live2DDisplay from './components/Live2DModel'
 import ConfigPanel from './components/ConfigPanel'
 import VoiceInput from './components/VoiceInput'
+import Background from './components/Background'
+import Particles from './components/Particles'
+import MoodOverlay from './components/MoodOverlay'
+import DialogueBox from './components/DialogueBox'
+import DialogueHistory from './components/DialogueHistory'
 import { api } from './api/client'
 import { useLipSync } from './hooks/useLipSync'
+import { getTimeOfDay } from './utils/timeOfDay'
+import audioManager from './audio/AudioManager'
 import './App.css'
 
 function App() {
@@ -11,9 +18,17 @@ function App() {
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(false)
   const [showConfig, setShowConfig] = useState(false)
-  const [subtitleVisible, setSubtitleVisible] = useState(false)
+  const [dialogueVisible, setDialogueVisible] = useState(false)
+  const [dialogueText, setDialogueText] = useState('')
+  const [isTypewriter, setIsTypewriter] = useState(false)
+  const [dialogueHistory, setDialogueHistory] = useState([])
+  const [showHistory, setShowHistory] = useState(false)
+  const [charName, setCharName] = useState('')
   const [sentStatus, setSentStatus] = useState(null) // null | 'pending' | 'received'
   const [initialized, setInitialized] = useState(null) // null=加载中, false=未初始化, true=已初始化
+  const [timeOfDay, setTimeOfDay] = useState(getTimeOfDay)
+  const [currentExpression, setCurrentExpression] = useState(null)
+  const [bgmMuted, setBgmMuted] = useState(() => JSON.parse(localStorage.getItem('bgmMuted') || 'false'))
   const [ttsEnabled, setTtsEnabled] = useState(() => {
     const saved = localStorage.getItem('ttsEnabled')
     return saved !== null ? JSON.parse(saved) : true
@@ -36,13 +51,16 @@ function App() {
     })
   }
 
-  function showSubtitle() {
-    setSubtitleVisible(true)
+  function showDialogue(text, typewriter = false) {
+    setDialogueText(text)
+    setIsTypewriter(typewriter)
+    setDialogueVisible(true)
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     hideTimerRef.current = setTimeout(() => {
-      setSubtitleVisible(false)
+      setDialogueVisible(false)
     }, 5000)
   }
+
   const { playWithLipSync, warmUp } = useLipSync({
     onMouthValue: (value) => {
       if (live2dRef.current) live2dRef.current.setMouthOpenY(value)
@@ -53,10 +71,13 @@ function App() {
   })
   const [isTracking, setIsTracking] = useState(true)
 
-  // 启动时检测初始化状态
+  // 启动时检测初始化状态 + 加载 persona
   useEffect(() => {
     api.getStatus().then(status => {
       setInitialized(status.initialized)
+      if (status.persona?.char_name) {
+        setCharName(status.persona.char_name)
+      }
     }).catch(() => setInitialized(false))
   }, [])
 
@@ -65,6 +86,7 @@ function App() {
     api.getHistory().then((history) => {
       if (history && history.length > 0) {
         setMessages(history)
+        setDialogueHistory(history.filter(m => m.content))
       }
     }).catch((err) => {
       console.error('Failed to load history:', err)
@@ -78,11 +100,14 @@ function App() {
       try {
         const data = await api.getProactive()
         if (data.message) {
-          setMessages(prev => [...prev, { type: 'assistant', content: data.message, source: 'heartbeat' }])
+          const msg = { type: 'assistant', content: data.message, source: 'heartbeat' }
+          setMessages(prev => [...prev, msg])
+          setDialogueHistory(prev => [...prev, msg])
           if (data.expression && live2dRef.current) {
             live2dRef.current.showExpression(data.expression)
+            setCurrentExpression(data.expression)
           }
-          showSubtitle()
+          showDialogue(data.message, true) // heartbeat 用打字机效果
           if (data.audio && ttsEnabledRef.current) {
             live2dRef.current?.zoomIn()
             playWithLipSync(data.audio)
@@ -111,10 +136,42 @@ function App() {
     }
   }, [])
 
+  // timeOfDay 定时刷新
+  useEffect(() => {
+    const timer = setInterval(() => setTimeOfDay(getTimeOfDay()), 60000)
+    return () => clearInterval(timer)
+  }, [])
+
+  // 同步 timeOfDay 到 audioManager
+  useEffect(() => {
+    audioManager.setTimeOfDay(timeOfDay)
+  }, [timeOfDay])
+
+  // 情绪叠层自动消退
+  useEffect(() => {
+    if (!currentExpression) return
+    const timer = setTimeout(() => setCurrentExpression(null), 4000)
+    return () => clearTimeout(timer)
+  }, [currentExpression])
+
+  // 滚轮上滑打开历史
+  useEffect(() => {
+    const handleWheel = (e) => {
+      if (e.deltaY < -50 && !showHistory) {
+        setShowHistory(true)
+      }
+    }
+    window.addEventListener('wheel', handleWheel)
+    return () => window.removeEventListener('wheel', handleWheel)
+  }, [showHistory])
+
+  const closeHistory = useCallback(() => setShowHistory(false), [])
+
   const handleSendMessage = (directMessage) => {
     const text = directMessage ?? input
     if (!text.trim()) return
     warmUp() // 在用户手势上下文中预热 AudioContext
+    audioManager.tryAutoPlay()
     if (!directMessage) {
       // 不立刻清空，等回复到达后淡出消失
       setSentStatus('pending')
@@ -127,11 +184,19 @@ function App() {
     abortRef.current = controller
 
     setLoading(true)
-    setMessages(prev => [...prev, { type: 'user', content: text }])
+    const userMsg = { type: 'user', content: text }
+    setMessages(prev => [...prev, userMsg])
+    setDialogueHistory(prev => [...prev, userMsg])
 
     // 后端 text 事件携带的是原始 LLM JSON 片段，需要增量提取 reply 字段
     let rawAccumulator = ''
     pendingReplyRef.current = ''
+
+    // 流式显示：先显示空对话框
+    setDialogueText('')
+    setIsTypewriter(false)
+    setDialogueVisible(true)
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
 
     function extractReply(raw) {
       try {
@@ -151,10 +216,15 @@ function App() {
       onText: (chunk) => {
         rawAccumulator += chunk
         const replyText = extractReply(rawAccumulator)
-        if (replyText !== null) pendingReplyRef.current = replyText
+        if (replyText !== null) {
+          pendingReplyRef.current = replyText
+          // 流式更新对话框文本
+          setDialogueText(replyText)
+        }
       },
       onExpression: (expression) => {
         if (live2dRef.current) live2dRef.current.showExpression(expression)
+        setCurrentExpression(expression)
         hasExpressionRef.current = true
       },
       onAudio: (audioBase64) => {
@@ -169,7 +239,11 @@ function App() {
           setMessages(prev => prev.map(m =>
             m.generationId === gid ? { ...m, content: text } : m
           ))
-          showSubtitle()
+          // 重置自动隐藏计时器
+          if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+          hideTimerRef.current = setTimeout(() => {
+            setDialogueVisible(false)
+          }, 5000)
         }
         // 只在有情绪表情时才推镜
         if (hasExpressionRef.current) {
@@ -182,6 +256,9 @@ function App() {
       },
       onInitComplete: (persona) => {
         setInitialized(true)
+        if (persona?.char_name) {
+          setCharName(persona.char_name)
+        }
       },
       onDone: () => {
         if (rawAccumulator) {
@@ -194,7 +271,13 @@ function App() {
             }
             return [...prev, { type: 'assistant', content: finalText }]
           })
-          showSubtitle()
+          setDialogueText(finalText)
+          setDialogueHistory(prev => [...prev, { type: 'assistant', content: finalText }])
+          // 重置自动隐藏计时器
+          if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+          hideTimerRef.current = setTimeout(() => {
+            setDialogueVisible(false)
+          }, 5000)
         }
         // 无音频时的兜底：回复到达后清空输入框
         if (hasPendingInputRef.current) {
@@ -212,16 +295,41 @@ function App() {
         setSentStatus(null)
         abortRef.current = null
         setLoading(false)
+        setDialogueVisible(false)
       },
     }, { signal: controller.signal })
   }
 
-  const lastAssistantMessage = messages.filter(m => m.type === 'assistant').at(-1)
-
   return (
     <div className="app">
-      {/* 右上角配置按钮 */}
-      {initialized && <button className="config-btn" onClick={() => setShowConfig(true)} title="设置">⚙</button>}
+      {/* 场景背景 */}
+      <Background />
+      <Particles timeOfDay={timeOfDay} />
+      <div className="vignette" />
+      <MoodOverlay expression={currentExpression} />
+
+      {/* 右上角按钮组 */}
+      {initialized && (
+        <>
+          <button
+            className={`bgm-toggle${bgmMuted ? ' off' : ''}`}
+            onClick={() => {
+              audioManager.tryAutoPlay()
+              const muted = audioManager.toggle()
+              setBgmMuted(muted)
+            }}
+            title={bgmMuted ? 'BGM 关闭' : 'BGM 开启'}
+          >
+            {bgmMuted ? '♪' : '♫'}
+          </button>
+          <button className="history-btn" onClick={() => setShowHistory(true)} title="对话历史">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M3 6h18M3 12h18M3 18h12" />
+            </svg>
+          </button>
+          <button className="config-btn" onClick={() => setShowConfig(true)} title="设置">⚙</button>
+        </>
+      )}
 
       {/* 配置面板 */}
       {showConfig && <ConfigPanel onClose={() => setShowConfig(false)} />}
@@ -229,19 +337,14 @@ function App() {
       {/* Live2D 主区域 */}
       <div className="live2d-main">
         <Live2DDisplay ref={live2dRef} />
-        <div className="subtitles">
-          {loading && !lastAssistantMessage ? (
-            <div className="subtitle-text loading">...</div>
-          ) : lastAssistantMessage && (
-            <div className={`subtitle-text ${subtitleVisible ? 'entering' : 'leaving'}`}>
-              {lastAssistantMessage.content}
-            </div>
-          )}
-        </div>
       </div>
 
-      {/* 输入区域 */}
-      <div className="chat-input-container">
+      {/* 底部对话面板（台词 + 输入） */}
+      <DialogueBox
+        text={dialogueText}
+        textVisible={dialogueVisible}
+        isTypewriter={isTypewriter}
+      >
         <VoiceInput
           onTranscribed={(text) => setInput(prev => prev + text)}
           onAutoSend={(text) => handleSendMessage(text)}
@@ -265,7 +368,15 @@ function App() {
         >
           {ttsEnabled ? '🔊' : '🔇'}
         </button>
-      </div>
+      </DialogueBox>
+
+      {/* 对话历史 */}
+      <DialogueHistory
+        history={dialogueHistory}
+        charName={charName}
+        visible={showHistory}
+        onClose={closeHistory}
+      />
     </div>
   )
 }

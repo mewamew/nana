@@ -115,7 +115,8 @@ class SomeProvider(BaseLLMProvider):
 
 - **不得**在代码中硬编码 API Key 或 URL
 - **不得**在 `providers/` 目录外直接 import 具体 Provider 类
-- **不得**修改 `prompts/reply.txt`
+- **不得**修改 `prompts/reply.md` 的回复规则和输出格式（允许将硬编码的角色名/用户称呼替换为 `{char_name}/{user_name}` 模板变量）
+- **不得**修改 `prompts/soul.md` 的人设内容（允许将硬编码的"娜娜"/"主人"替换为 `{char_name}/{user_name}` 模板变量）
 - **不得**修改 `Live2DModel.jsx` 中 Live2D 初始化和渲染逻辑（除非是 07-frontend spec 明确要求）
 - **不得**引入 `config.py`（旧文件，已被 `config_manager.py` 取代）
 - **不得**创建 `.env` 文件

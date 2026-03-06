@@ -70,9 +70,11 @@ nana/
 │   │       ├── tool.py
 │   │       └── requirements.txt
 │   ├── prompts/
-│   │   ├── soul.md               # 角色人设（不得修改）
-│   │   ├── reply.md              # 回复指令 Prompt
-│   │   ├── heartbeat.md          # 心跳 LLM 决策 Prompt
+│   │   ├── soul.md               # 角色人设（模板化，含 {char_name}/{user_name}）
+│   │   ├── reply.md              # 回复指令 Prompt（模板化）
+│   │   ├── heartbeat.md          # 心跳 LLM 决策 Prompt（模板化）
+│   │   ├── diary.md              # 日记生成 Prompt（模板化）
+│   │   ├── init.md               # 初始化对话 Prompt（首次启动苏醒对话）
 │   │   ├── memory_extract.md     # 记忆提取 Prompt
 │   │   └── tool_decision.md      # 工具决策 Prompt
 │   ├── config_manager.py         # config.json 读写，热重载
@@ -88,6 +90,7 @@ nana/
 │   ├── embedding_utils.py        # 向量嵌入 + 余弦相似度
 │   ├── tts.py                    # TTS 辅助（文本分块等）
 │   ├── diary.py                  # 日记系统
+│   ├── persona.py                # persona.json 读写（初始化状态判断）
 │   └── utils.py                  # 通用工具函数
 │
 ├── frontend/
@@ -111,6 +114,11 @@ nana/
 │       └── api/
 │           └── client.js         # 统一 API 请求封装
 │
+├── save/                         # 运行时数据目录（.gitignore）
+│   ├── persona.json              # 角色/用户名持久化（初始化完成后生成）
+│   ├── memory/                   # 记忆文件
+│   ├── diary/                    # 日记文件
+│   └── log/                      # 对话日志
 ├── config.json                   # 运行时配置（已加入 .gitignore）
 ├── config.example.json           # 配置模板（提交到 git）
 └── specs/                        # 本文件所在目录
@@ -254,14 +262,15 @@ data: {"type": "done"}
 data: {"type": "error",      "content": "LLM 服务暂时不可用"}
 ```
 
-**事件类型**：`generation_id` / `text` / `expression` / `audio` / `done` / `error`
+**事件类型**：`generation_id` / `text` / `expression` / `audio` / `init_complete` / `done` / `error`
 
 **顺序约定**：
 1. `generation_id` 事件标识本次生成（1个）
 2. `text` 事件在 LLM 生成时实时发送（多个）
 3. `expression` 事件在 LLM 完整回复解析后发送（1个）
 4. `audio` 事件在 TTS 合成完成后发送（0或1个，取决于 TTS 是否配置且 `tts_enabled=true`）
-5. `done` 事件最后发送
+5. `init_complete` 事件仅在初始化模式最后一轮出现（0或1个）
+6. `done` 事件最后发送
 
 ---
 
@@ -269,7 +278,8 @@ data: {"type": "error",      "content": "LLM 服务暂时不可用"}
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/chat` | SSE 流式对话 |
+| POST | `/api/chat` | SSE 流式对话（初始化模式和正常模式共用） |
+| GET  | `/api/status` | 获取初始化状态和角色信息 |
 | GET  | `/api/proactive` | 轮询主动消息（心跳系统生成） |
 | POST | `/api/stt` | 语音转文字（返回 JSON） |
 | GET  | `/api/history` | 获取对话历史 |
@@ -304,6 +314,24 @@ format: "webm"
 {
   "llm": { "active": "deepseek", "providers": { "deepseek": { "api_key": "***", "model": "..." } } },
   ...
+}
+```
+
+### `/api/status` 响应
+
+已初始化：
+```json
+{
+  "initialized": true,
+  "persona": { "char_name": "娜娜", "user_name": "主人" }
+}
+```
+
+未初始化：
+```json
+{
+  "initialized": false,
+  "persona": null
 }
 ```
 
@@ -358,6 +386,6 @@ format: "webm"
 1. **不使用 `.env` 文件**，配置统一由 `config.json` 管理
 2. **`config.json` 加入 `.gitignore`**，使用 `config.example.json` 作为模板
 3. **业务代码不直接 import 具体 Provider 类**，只通过工厂函数获取
-4. **不修改 `prompts/soul.md`**（角色人设独立维护）
+4. **`prompts/soul.md` 仅允许模板化改动**（将硬编码的角色名/用户称呼替换为 `{char_name}/{user_name}` 变量，不得修改人设内容本身）
 5. **Live2D 模型使用 PinkFox**（表情系统基于 PinkFox 参数 key2-key17）
 6. **Python 最低版本**：3.10（使用 `match` 语句和 `list[dict]` 泛型语法）

@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 
 from emotional_state import EmotionalState
+from persona import load_persona
 
 
 class NanaDiary:
@@ -15,6 +16,11 @@ class NanaDiary:
         prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "diary.md")
         with open(prompt_path, "r", encoding="utf-8") as f:
             self.prompt_template = f.read()
+
+        persona = load_persona()
+        char_name = persona["char_name"] if persona else "娜娜"
+        user_name = persona["user_name"] if persona else "主人"
+        self.prompt_template = self.prompt_template.replace("{char_name}", char_name).replace("{user_name}", user_name)
 
     async def write_daily_entry(self, conversation_log: str) -> str:
         """生成并保存日记到 save/diary/YYYY-MM-DD.txt"""

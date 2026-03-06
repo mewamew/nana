@@ -142,7 +142,7 @@ const Live2DDisplay = forwardRef((props, ref) => {
     const app = new PIXI.Application({
       width: window.innerWidth,
       height: window.innerHeight,
-      backgroundColor: 0x000000,
+      backgroundAlpha: 0,
       resizeTo: window,
       antialias: true,
     })

@@ -7,6 +7,7 @@ from typing import Any, AsyncGenerator, Tuple
 
 from conversation import ConversationHistory
 from emotional_state import EmotionalState
+from persona import load_persona, save_persona
 from providers import get_llm
 from skill_manager import SkillManager
 from tools import ToolExecutor, render_tool_definitions
@@ -23,13 +24,16 @@ class MainAgent:
         self.conversation_history = conversation_history
         self.llm_service = llm_service
         self.emotional_state = emotional_state
-        soul_path = os.path.join(os.path.dirname(__file__), "prompts", "soul.md")
-        reply_path = os.path.join(os.path.dirname(__file__), "prompts", "reply.md")
-        with open(soul_path, "r", encoding="utf-8") as f:
-            soul = f.read()
-        with open(reply_path, "r", encoding="utf-8") as f:
-            reply = f.read()
-        self.prompt_template = soul + "\n\n" + reply
+
+        # 加载 persona
+        self.persona = load_persona()
+        self.initialized = self.persona is not None
+
+        if self.initialized:
+            self._load_normal_prompts()
+        else:
+            self._load_init_prompt()
+            print("[Agent] 未初始化，等待初始化对话")
 
         decision_path = os.path.join(os.path.dirname(__file__), "prompts", "tool_decision.md")
         with open(decision_path, "r", encoding="utf-8") as f:
@@ -42,6 +46,23 @@ class MainAgent:
         # 确保日志目录存在
         self.log_dir = os.path.join(os.path.dirname(__file__), '..', 'save', 'log')
         os.makedirs(self.log_dir, exist_ok=True)
+
+    def _load_normal_prompts(self) -> None:
+        soul_path = os.path.join(os.path.dirname(__file__), "prompts", "soul.md")
+        reply_path = os.path.join(os.path.dirname(__file__), "prompts", "reply.md")
+        with open(soul_path, "r", encoding="utf-8") as f:
+            soul = f.read()
+        with open(reply_path, "r", encoding="utf-8") as f:
+            reply = f.read()
+        raw = soul + "\n\n" + reply
+        char_name = self.persona["char_name"] if self.persona else "娜娜"
+        user_name = self.persona["user_name"] if self.persona else "主人"
+        self.prompt_template = raw.replace("{char_name}", char_name).replace("{user_name}", user_name)
+
+    def _load_init_prompt(self) -> None:
+        init_path = os.path.join(os.path.dirname(__file__), "prompts", "init.md")
+        with open(init_path, "r", encoding="utf-8") as f:
+            self.init_template = f.read()
 
     def _log_conversation(self, role: str, content: str) -> None:
         """记录对话到日志文件"""
@@ -129,6 +150,11 @@ class MainAgent:
 
     async def reply_stream(self, message: str) -> AsyncGenerator[str, None]:
         """流式生成原始 LLM 输出（JSON 格式的字符串片段）"""
+        if not self.initialized:
+            async for chunk in self._init_stream(message):
+                yield chunk
+            return
+
         self._log_conversation("user", message)
 
         tool_results_text = await self._run_tool_loop(message)
@@ -164,6 +190,43 @@ class MainAgent:
 
         if full_response:
             await self._handle_full_response(message, full_response)
+
+    async def _init_stream(self, message: str) -> AsyncGenerator[str, None]:
+        """初始化模式：使用 init.md prompt 进行对话"""
+        self._log_conversation("user", message)
+        context = self.conversation_history.get_context()
+        prompt = self.init_template.format(chat_history=context or "（这是第一句话）")
+
+        messages = [{"role": "user", "content": prompt + "\n\n用户说：" + message}]
+        llm = get_llm()
+
+        full_response = ""
+        async for chunk in llm.chat_stream(messages, temperature=0.8):
+            full_response += chunk
+            yield chunk
+
+        if full_response:
+            await self._handle_init_response(message, full_response)
+
+    async def _handle_init_response(self, message: str, raw_response: str) -> None:
+        """解析初始化响应，若 done=true 则保存 persona"""
+        try:
+            data = self._parse_json(raw_response)
+            reply_text = data.get("reply", "")
+
+            # 记录对话
+            if reply_text:
+                self._log_conversation("assistant", reply_text)
+                await self.conversation_history.add_dialog(message, reply_text)
+
+            # 检查初始化是否完成
+            if data.get("done") and data.get("char_name") and data.get("user_name"):
+                persona = save_persona(data["char_name"], data["user_name"])
+                self.persona = persona
+                self.initialized = True
+                self._load_normal_prompts()
+        except Exception as e:
+            print(f"[Agent] 处理初始化回复失败: {e}")
 
     def extract_expression(self, raw_response: str) -> str:
         """从 LLM 原始输出中提取表情字段"""

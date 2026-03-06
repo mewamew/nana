@@ -82,6 +82,8 @@ class ChatService:
 
             yield {"type": "generation_id", "content": generation_id}
 
+            was_init = self.main_agent.initialized
+
             print(f"[Chat] 用户: {message}")
 
             chunks: list[str] = []
@@ -109,6 +111,13 @@ class ChatService:
                 expression = self.main_agent.extract_expression(full_text)
                 if expression:
                     yield {"type": "expression", "content": expression}
+
+            # 初始化完成事件：流开始时未初始化，流结束后已初始化
+            if not was_init and self.main_agent.initialized:
+                yield {"type": "init_complete", "content": json.dumps({
+                    "char_name": self.main_agent.persona["char_name"],
+                    "user_name": self.main_agent.persona["user_name"],
+                }, ensure_ascii=False)}
 
             if tts_enabled:
                 try:

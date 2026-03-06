@@ -6,7 +6,7 @@ export const api = {
    * callbacks: { onText, onExpression, onAudio, onDone, onError }
    */
   chatStream(message, ttsEnabled = true, callbacks = {}, options = {}) {
-    const { onText, onExpression, onAudio, onDone, onError, onGenerationId } = callbacks
+    const { onText, onExpression, onAudio, onDone, onError, onGenerationId, onInitComplete } = callbacks
     const { signal } = options
 
     const run = async () => {
@@ -58,6 +58,9 @@ export const api = {
                   break
                 case "audio":
                   onAudio?.(parsed.content)
+                  break
+                case "init_complete":
+                  onInitComplete?.(JSON.parse(parsed.content))
                   break
                 case "done":
                   onDone?.()
@@ -125,6 +128,16 @@ export const api = {
     const res = await fetch(`${BASE_URL}/api/proactive`)
     if (!res.ok) return { message: null }
     return res.json()
+  },
+
+  async getStatus() {
+    try {
+      const res = await fetch(`${BASE_URL}/api/status`)
+      if (!res.ok) return { initialized: false, persona: null }
+      return res.json()
+    } catch {
+      return { initialized: false, persona: null }
+    }
   },
 }
 
