@@ -1,4 +1,4 @@
-# 16 — 心跳系统：60s tick + LLM 决策 + 注意力管理 `[需要测试]`
+# 16 — 心跳系统：60s tick + LLM 决策 + 注意力管理 `[已实现]`
 
 ## 概述
 
@@ -15,21 +15,28 @@ EmotionalState.record_interaction()
 HeartbeatSystem.notify_interaction()    ← response_rate = 0.4
         │
         ▼ (每 60s tick)
-   ┌─────────────────┐
-   │   5 道门控检查    │
-   │  1. 活跃时间      │
-   │  2. 无 pending    │
-   │  3. MIN_GAP       │
-   │  4. 有过互动      │
-   │  5. rate 概率门控  │
-   └────────┬─────────┘
+   ┌──────────────────────────┐
+   │      6 道门控检查          │
+   │  0. 已完成初始化           │
+   │  1. 活跃时间               │
+   │  2. 无 pending（TTL 超时丢弃）│
+   │  3. MIN_GAP               │
+   │  4. 有过互动               │
+   │  5. rate 概率门控          │
+   └────────┬─────────────────┘
             │ 通过
             ▼
-   LLM 决策 + 生成
+   LLM 决策 + 生成（动态注入 persona）
    {"action": "send_message" | "wait"}
+            │ send_message
+            ▼
+   写入对话历史 + SQLite
             │
             ▼
    前端轮询 /api/proactive 取走消息
+            │
+            ▼
+   持久化 response_rate + last_proactive
 ```
 
 ---
@@ -39,8 +46,10 @@ HeartbeatSystem.notify_interaction()    ← response_rate = 0.4
 | 文件 | 职责 |
 |------|------|
 | `backend/heartbeat.py` | HeartbeatSystem 类，tick 循环、门控、注意力系统、LLM 调用 |
-| `backend/prompts/heartbeat.md` | LLM 决策 prompt（action 选择 + 消息生成） |
-| `backend/emotional_state.py` | 交互回调机制（`on_interaction()` + `record_interaction()` 触发） |
+| `backend/prompts/heartbeat.md` | LLM 决策 prompt（action 选择 + 消息生成），使用 `{char_name}` / `{user_name}` 占位符，每次调用时动态注入 |
+| `backend/emotional_state.py` | 交互回调机制 + 心跳状态持久化（`heartbeat` 字段） |
+| `backend/conversation.py` | `add_message()` 支持单条消息写入，`get_recent_context()` 按条数截取 |
+| `backend/database.py` | `save_message()` 单条消息持久化 |
 | `backend/main.py` | lifespan 中启动心跳任务，`/api/proactive` 端点 |
 
 ---
@@ -51,6 +60,7 @@ HeartbeatSystem.notify_interaction()    ← response_rate = 0.4
 |------|------|------|
 | `TICK_INTERVAL` | 60 | tick 间隔（秒） |
 | `MIN_GAP` | 300 | 两条主动消息最小间隔（5 分钟） |
+| `PENDING_TTL` | 300 | pending 消息超时时间（5 分钟），超时后自动丢弃 |
 | `ACTIVE_START` | 8 | 活跃时间起始（8:00） |
 | `ACTIVE_END` | 23 | 活跃时间结束（23:00） |
 | `DECAY_FACTOR` | 0.997 | 每 tick response_rate 乘法衰减 |
@@ -88,19 +98,25 @@ tick 中先检查 `rate >= LLM_CALL_THRESHOLD`，再用 `random() < rate` 做概
 
 ---
 
-## Tick 流程（5 道门控）
+## Tick 流程（6 道门控）
 
 ```python
 async def _tick(self):
+    # 门控 0: 必须已完成初始化
+    if not is_initialized():
+        return
+
     self._update_response_rate()
 
     # 门控 1: 活跃时间 8:00-23:00（硬门控）
     if not (ACTIVE_START <= hour < ACTIVE_END):
         return
 
-    # 门控 2: 无待消费的 pending_message
+    # 门控 2: 无待消费的 pending_message（超时 PENDING_TTL 则丢弃）
     if self._pending_message is not None:
-        return
+        if (now - created_at) < PENDING_TTL:
+            return
+        self._pending_message = None  # 超时丢弃
 
     # 门控 3: MIN_GAP 5 分钟间隔
     if last_proactive and elapsed < MIN_GAP:
@@ -116,8 +132,13 @@ async def _tick(self):
     if random() >= rate:
         return
 
-    # → 调 LLM 决策
+    # → 调 LLM 决策（动态注入 persona）
     result = await self._llm_decide_and_generate()
+    if result:
+        await conversation_history.add_message("assistant", result["message"])
+        self._pending_message = {**result, "created_at": now}
+    # → 持久化心跳状态
+    emotional_state.save_heartbeat_state(response_rate, last_proactive)
 ```
 
 ---
@@ -132,7 +153,7 @@ Prompt 模板位于 `backend/prompts/heartbeat.md`，占位符：
 | `{time_context}` | `EmotionalState.get_time_context()` |
 | `{relationship_context}` | `EmotionalState.get_relationship_description()` |
 | `{user_info}` | `ConversationHistory.format_profile()` |
-| `{recent_context}` | `ConversationHistory.get_context()` |
+| `{recent_context}` | `ConversationHistory.get_recent_context(n=10)` |
 | `{hours_since_interaction}` | 距上次互动小时数 |
 | `{response_rate}` | 当前注意力值 |
 
@@ -224,3 +245,56 @@ for cb in self._interaction_callbacks:
 | `start()` | async 后台任务入口（在 lifespan 中 create_task） |
 | `pop_pending_message()` | 取出待发送消息，取后清空 |
 | `notify_interaction()` | 互动回调，设 `response_rate = INTERACTION_BOOST` |
+
+---
+
+## 历史记录集成
+
+心跳生成的主动消息在 `_tick()` 中 LLM 返回 `send_message` 后，立即写入对话历史：
+
+1. `conversation_history.add_message("assistant", message)` — 写入内存 turns（用 `ConversationTurn("", content)` 表示只有 assistant 的消息）+ SQLite（`save_message()`）
+2. `get_context()` 和 `get_recent_context()` 会跳过空 ask，只输出 `assistant: ...`
+3. `/api/history` 通过 `get_history_for_frontend()` 返回所有消息（包括心跳消息）
+4. 重启后 `_restore_from_db()` 通过 `get_recent_dialogs()` 恢复配对消息，心跳消息不会进入内存 turns（仍保留在 SQLite 中）
+
+---
+
+## 前端并发安全
+
+流式回复与心跳消息互不覆盖：
+
+1. `onGenerationId` 收到时，立即创建带 `generationId` 的 assistant 占位消息
+2. `onAudio` / `onDone` 通过 `generationId` 精准匹配更新对应消息
+3. 心跳消息独立 `append`，带 `source: 'heartbeat'`，不受流式更新影响
+
+---
+
+## 状态持久化
+
+`nana_state.json` 中的 `heartbeat` 字段：
+
+```json
+{
+  "mood": { ... },
+  "relationship": { ... },
+  "daily": { ... },
+  "heartbeat": {
+    "response_rate": 0.24,
+    "last_proactive": "2026-03-06T12:20:00"
+  }
+}
+```
+
+- **写入时机**：`_tick()` 末尾（通过门控后，无论 LLM 决定发消息还是等待）
+- **恢复时机**：`__init__` 中从 `emotional_state.get_heartbeat_state()` 读取
+- `last_interaction_time` 已有从 `relationship.last_interaction` 恢复的逻辑
+
+---
+
+## 设计备注
+
+- **主动消息不触发 `record_interaction`**：主动消息是角色单方面行为，不应算互动。用户回复时正常聊天流程会触发
+- **Prompt 模板使用 `str.replace()` 链**：避免 `str.format()` 在动态字段含 `{` 时抛 `KeyError`
+- **Persona 动态注入**：`__init__` 只加载原始模板，每次 `_llm_decide_and_generate()` 重新 `load_persona()` 并替换 `{char_name}` / `{user_name}`
+- **JSON 解析三级容错**：① 直接 `json.loads` → ② 匹配 ``` 代码块 → ③ 花括号平衡匹配
+- **Pending 消息超时**：`_pending_message` 附带 `created_at`，超过 `PENDING_TTL`（5 分钟）未被前端消费则自动丢弃，`pop_pending_message()` 返回前剥离 `created_at` 字段
