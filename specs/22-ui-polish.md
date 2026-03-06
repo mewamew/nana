@@ -1,4 +1,4 @@
-# 22 — P2：UI 统一美化 + 情绪光效联动
+# 22 — UI 统一美化 + 情绪光效联动（已实现）
 
 ## 概述
 
@@ -9,278 +9,174 @@
 
 ---
 
-## 一、图标系统统一
+## 一、图标系统统一（已实现）
 
-### 1.1 当前问题
+### 1.1 图标组件
 
-现有 UI 使用 emoji 作为按钮图标（⚙️🔊🔇🎤），存在问题：
-- 不同操作系统/浏览器渲染不一致
-- 无法精确控制颜色和大小
-- 与整体 galgame 美术风格不搭
-
-### 1.2 图标方案
-
-使用内联 SVG 组件，不引入图标库（保持轻量）。
-
-新增 `frontend/src/components/icons/` 目录：
+`frontend/src/components/icons/` 目录，6 个 SVG 图标组件：
 
 ```
 frontend/src/components/icons/
 ├── index.js              # 统一导出
-├── MicIcon.jsx           # 麦克风
-├── SpeakerIcon.jsx       # 喇叭（TTS 开启）
-├── SpeakerOffIcon.jsx    # 喇叭关闭（TTS 关闭）
-├── SettingsIcon.jsx      # 齿轮（设置）
-├── MusicIcon.jsx         # 音符（BGM 控制，配合 spec-21）
-└── HistoryIcon.jsx       # 回看（对话历史，配合 spec-20）
+├── MicIcon.jsx           # 麦克风（矩形+弧线+底座）
+├── SpeakerIcon.jsx       # 喇叭+声波弧线（TTS 开启）
+├── SpeakerOffIcon.jsx    # 喇叭+X叉（TTS 关闭）
+├── SettingsIcon.jsx      # 圆心+齿轮射线（设置）
+├── MusicIcon.jsx         # 双音符+连杆（BGM 控制）
+└── HistoryIcon.jsx       # 三横线列表（对话历史）
 ```
 
-### 1.3 图标风格规范
+### 1.2 图标风格规范
 
-- **线条风格**：细线描边（stroke-width: 1.5-2），不填充
-- **颜色**：默认 `rgba(255, 255, 255, 0.7)`，hover 时 `#fff`
-- **尺寸**：统一 20x20 viewBox，通过 CSS 控制实际大小
-- **过渡**：hover/active 状态 0.2s ease 过渡
+- **线条风格**：`stroke="currentColor"` strokeWidth 1.5，strokeLinecap/strokeLinejoin round
+- **颜色**：默认 `rgba(255, 255, 255, 0.7)`，hover 时 `#fff`，active 时 `#2FA4E7`
+- **尺寸**：viewBox `0 0 20 20`，通过 `size` prop 控制实际大小
+- **props**：所有图标接收 `size` + `className`
 
-示例：
+### 1.3 按钮组件
+
+`frontend/src/components/IconButton.jsx`：
 
 ```jsx
-function MicIcon({ size = 20, className = '' }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 20 20"
-         fill="none" stroke="currentColor" strokeWidth="1.5"
-         className={className}>
-      <rect x="7" y="2" width="6" height="10" rx="3" />
-      <path d="M4 9a6 6 0 0 0 12 0" />
-      <line x1="10" y1="15" x2="10" y2="18" />
-      <line x1="7" y1="18" x2="13" y2="18" />
-    </svg>
-  );
-}
+function IconButton({ icon: Icon, label, active, className = '', onClick, ...props })
 ```
 
-### 1.4 按钮组件统一
+- 渲染 `<button className="icon-btn">` + `<Icon size={20} />`
+- `active` prop 控制高亮状态
+- `className` 叠加位置类（如 `btn-pos-config`）
+- `...props` 透传给 button 元素
+- VoiceInput 的麦克风按钮因有特殊 mouseDown/Up/touchStart/End 事件，直接使用 `<MicIcon>` 不走 IconButton
 
-新增 `frontend/src/components/IconButton.jsx`：
+---
 
-```jsx
-function IconButton({ icon: Icon, label, active, onClick, ...props }) {
-  return (
-    <button
-      className={`icon-btn ${active ? 'active' : ''}`}
-      onClick={onClick}
-      title={label}
-      {...props}
-    >
-      <Icon size={20} />
-    </button>
-  );
-}
-```
+## 二、按钮布局（已实现）
+
+### 2.1 右上角按钮组
+
+4 个按钮固定在右上角，从左到右排列：
+
+| 位置类 | right | 按钮 | 图标 |
+|--------|-------|------|------|
+| `.btn-pos-tts` | 176px | TTS 开关 | SpeakerIcon / SpeakerOffIcon |
+| `.btn-pos-bgm` | 124px | BGM 开关 | MusicIcon |
+| `.btn-pos-history` | 72px | 对话历史 | HistoryIcon |
+| `.btn-pos-config` | 20px | 设置 | SettingsIcon |
+
+所有按钮 `position: fixed; top: 20px; z-index: 30`。
+
+### 2.2 输入栏按钮
+
+仅保留麦克风按钮在输入栏内（VoiceInput 组件）。
+
+### 2.3 统一按钮样式
 
 ```css
 .icon-btn {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: rgba(0, 0, 0, 0.4);
+  width: 42px; height: 42px; border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(0,0,0,0.4);
   backdrop-filter: blur(4px);
-  color: rgba(255, 255, 255, 0.7);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  color: rgba(255,255,255,0.7);
   transition: all 0.2s ease;
 }
-
-.icon-btn:hover {
-  background: rgba(47, 164, 231, 0.2);
-  border-color: rgba(47, 164, 231, 0.4);
-  color: #fff;
-}
-
-.icon-btn.active {
-  background: rgba(47, 164, 231, 0.3);
-  border-color: rgba(47, 164, 231, 0.5);
-  color: #2FA4E7;
-}
+.icon-btn:hover  → 蓝色调背景 + 白色
+.icon-btn.active → 蓝色高亮
+.icon-btn.off    → 半透明
 ```
 
 ---
 
-## 二、输入框装饰
+## 三、输入框装饰（已实现）
 
-### 2.1 设计目标
+### 3.1 输入栏容器 `.dialogue-input-bar`
 
-输入框从纯功能性样式升级为 galgame 风格，增加装饰感但不影响易用性。
+- `max-width: 600px`（从 960px 缩短）
+- `background: linear-gradient(135deg, rgba(10,10,30,0.8), rgba(20,20,50,0.75))`
+- `border: 1px solid rgba(47,164,231,0.2)`
+- `box-shadow: 0 4px 20px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.05)`
 
-### 2.2 样式升级
+### 3.2 焦点效果
 
 ```css
-.chat-input-container {
-  /* 保持现有定位不变 */
-  background: linear-gradient(
-    135deg,
-    rgba(10, 10, 30, 0.8) 0%,
-    rgba(20, 20, 50, 0.75) 100%
-  );
-  border: 1px solid rgba(47, 164, 231, 0.2);
-  border-radius: 12px;
-  backdrop-filter: blur(12px);
-  box-shadow:
-    0 4px 20px rgba(0, 0, 0, 0.3),
-    inset 0 1px 0 rgba(255, 255, 255, 0.05);
-}
-
-/* 输入框获得焦点时，容器边框发光 */
-.chat-input-container:focus-within {
-  border-color: rgba(47, 164, 231, 0.5);
-  box-shadow:
-    0 4px 20px rgba(0, 0, 0, 0.3),
-    0 0 15px rgba(47, 164, 231, 0.15),
-    inset 0 1px 0 rgba(255, 255, 255, 0.05);
-}
-
-.chat-input {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 8px;
-  color: #fff;
-  font-size: 15px;
-  padding: 10px 14px;
-  transition: border-color 0.2s ease;
-}
-
-.chat-input:focus {
-  outline: none;
-  border-color: rgba(47, 164, 231, 0.3);
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.chat-input::placeholder {
-  color: rgba(255, 255, 255, 0.3);
+.dialogue-input-bar:focus-within {
+  border-color: rgba(47,164,231,0.45);
+  box-shadow: ... + 0 0 12px rgba(47,164,231,0.15);
 }
 ```
 
-### 2.3 装饰性角标（可选）
+### 3.3 四角装饰线
 
-在输入框容器的四角添加微小的装饰线条，增加 galgame 文本框质感：
+`::before`（左上）和 `::after`（右下）各绘制 12px L 型边框，颜色 `rgba(47,164,231,0.5)`。
+
+### 3.4 输入框
 
 ```css
-.chat-input-container::before,
-.chat-input-container::after {
-  content: '';
-  position: absolute;
-  width: 12px;
-  height: 12px;
-  border-color: rgba(47, 164, 231, 0.3);
-  border-style: solid;
-  pointer-events: none;
-}
-
-.chat-input-container::before {
-  top: -1px;
-  left: -1px;
-  border-width: 1px 0 0 1px;
-  border-radius: 4px 0 0 0;
-}
-
-.chat-input-container::after {
-  bottom: -1px;
-  right: -1px;
-  border-width: 0 1px 1px 0;
-  border-radius: 0 0 4px 0;
-}
+.chat-input       → border: rgba(255,255,255,0.08), background: rgba(255,255,255,0.05)
+.chat-input:focus  → border-color: rgba(47,164,231,0.3), background: rgba(255,255,255,0.08)
+::placeholder      → color: rgba(255,255,255,0.3)
 ```
 
 ---
 
-## 三、情绪背光联动
+## 四、情绪背光联动（已实现）
 
-### 3.1 扩展 spec-21 的角色背光
+### 4.1 角色背光 (Rim Light)
 
-spec-21 定义了静态的蓝色背光。本 spec 将其升级为情绪驱动的动态背光：
+`.app .live2d-main::after` 伪元素：
+- 绝对定位，底部居中，宽 80%，高 60%
+- `radial-gradient(ellipse, var(--rim-color) 0%, transparent 70%)`
+- `transition: background 1.5s ease`
+- `z-index: 0; pointer-events: none`
 
-| 表情类别 | 背光颜色 | 示例表情 |
-|---------|---------|---------|
-| 默认 | 淡蓝 `rgba(47, 164, 231, 0.15)` | 死鱼眼、nn眼 |
-| 开心 | 暖橙 `rgba(255, 200, 100, 0.15)` | 咪咪眼、吐舌 |
-| 害羞/爱情 | 粉红 `rgba(255, 150, 180, 0.18)` | 脸红、爱心 |
-| 伤心 | 冷蓝 `rgba(100, 150, 255, 0.15)` | 眼泪、泪眼 |
-| 生气 | 暗红 `rgba(255, 80, 80, 0.12)` | 生气、黑脸、生气瘪嘴 |
-| 俏皮 | 金色 `rgba(255, 220, 50, 0.12)` | 嘟嘴、钱钱眼 |
+### 4.2 表情→颜色映射
 
-### 3.2 实现
+`expressionToRimColor(expression)` 在 App.jsx 顶层定义：
 
-通过 CSS 变量在 App 层根据当前表情设置背光颜色：
+| expression | 颜色 | 语义 |
+|-----------|------|------|
+| `shy` | `rgba(255, 130, 180, 0.2)` | 害羞→粉 |
+| `angry` | `rgba(220, 60, 60, 0.18)` | 生气→红 |
+| `sad` | `rgba(100, 140, 220, 0.18)` | 伤心→蓝 |
+| `happy` | `rgba(255, 220, 100, 0.18)` | 开心→金 |
+| 默认/null | `rgba(47, 164, 231, 0.15)` | 默认→淡蓝 |
 
-```jsx
-// App.jsx
-const rimColor = expressionToRimColor(currentExpression);
-
-<div className="app" style={{ '--rim-color': rimColor }}>
-```
-
-```css
-.live2d-main::after {
-  background: radial-gradient(
-    ellipse,
-    var(--rim-color, rgba(47, 164, 231, 0.15)) 0%,
-    transparent 70%
-  );
-  transition: background 1.5s ease;
-}
-```
-
-### 3.3 表情到颜色的映射函数
-
-```javascript
-function expressionToRimColor(expression) {
-  const map = {
-    '咪咪眼': 'rgba(255, 200, 100, 0.15)',
-    '吐舌':   'rgba(255, 200, 100, 0.15)',
-    '脸红':   'rgba(255, 150, 180, 0.18)',
-    '爱心':   'rgba(255, 150, 180, 0.18)',
-    '眼泪':   'rgba(100, 150, 255, 0.15)',
-    '泪眼':   'rgba(100, 150, 255, 0.15)',
-    '生气':   'rgba(255, 80, 80, 0.12)',
-    '黑脸':   'rgba(255, 80, 80, 0.12)',
-    '生气瘪嘴': 'rgba(255, 80, 80, 0.12)',
-    '嘟嘴':   'rgba(255, 220, 50, 0.12)',
-    '钱钱眼': 'rgba(255, 220, 50, 0.12)',
-  };
-  return map[expression] || 'rgba(47, 164, 231, 0.15)';
-}
-```
+通过 CSS 变量 `--rim-color` 设在根 div `<div className="app" style={{ '--rim-color': ... }}>`。
 
 ---
 
-## 四、文件清单
+## 五、文件清单
 
 | 操作 | 文件 | 职责 |
 |------|------|------|
-| 新增 | `frontend/src/components/icons/*.jsx` | SVG 图标组件（6-7 个） |
+| 新增 | `frontend/src/components/icons/MicIcon.jsx` | 麦克风图标 |
+| 新增 | `frontend/src/components/icons/SpeakerIcon.jsx` | 喇叭图标 |
+| 新增 | `frontend/src/components/icons/SpeakerOffIcon.jsx` | 喇叭关闭图标 |
+| 新增 | `frontend/src/components/icons/SettingsIcon.jsx` | 齿轮图标 |
+| 新增 | `frontend/src/components/icons/MusicIcon.jsx` | 音符图标 |
+| 新增 | `frontend/src/components/icons/HistoryIcon.jsx` | 列表图标 |
+| 新增 | `frontend/src/components/icons/index.js` | 统一 re-export |
 | 新增 | `frontend/src/components/IconButton.jsx` | 统一按钮组件 |
-| 修改 | `frontend/src/App.jsx` | 替换 emoji 按钮、集成情绪背光 |
-| 修改 | `frontend/src/App.css` | 按钮样式、输入框装饰、背光变量 |
-| 修改 | `frontend/src/components/VoiceInput.jsx` | 使用 MicIcon 替换 emoji |
-| 修改 | `frontend/src/components/ConfigPanel.jsx` | 使用 SettingsIcon 替换 emoji |
+| 修改 | `frontend/src/App.css` | icon-btn 样式、位置类、删旧按钮样式、输入框装饰、rim light |
+| 修改 | `frontend/src/App.jsx` | 替换 4 个 emoji 按钮为 IconButton、rim light CSS 变量 |
+| 修改 | `frontend/src/components/VoiceInput.jsx` | 🎤 → MicIcon |
+| 修改 | `frontend/src/components/VoiceInput.css` | 对齐 icon-btn 风格 |
 
 ---
 
-## 五、依赖
+## 六、依赖
 
 - **前置**：spec-20（层级系统）、spec-21（基础背光 + 情绪 overlay）
 - **后端无改动**：本 spec 纯前端
 
 ---
 
-## 六、验证
+## 七、验证（已通过）
 
-1. 所有按钮（麦克风、TTS、设置）显示 SVG 图标，hover 时颜色变化平滑
-2. 不同浏览器/OS 上图标渲染一致
-3. 输入框聚焦时边框发光，装饰角标可见
-4. 角色表情切换时，背光颜色平滑过渡（1.5s）
-5. 脸红时粉色背光、生气时红色背光、默认蓝色背光
-6. 所有新样式在 1920x1080 和 1366x768 分辨率下正常显示
+1. 所有按钮显示 SVG 图标，hover 时颜色平滑变化
+2. 输入框聚焦时边框发光，四角装饰线可见
+3. 角色表情变化时背光颜色平滑过渡（1.5s）：害羞→粉、生气→红、默认→蓝
+4. BGM/TTS 按钮 active/off 状态正确切换
+5. 麦克风按钮录音/转写状态保持正常（红色脉动、蓝色等待）
+6. TTS 按钮已移至右上角按钮组
+7. 输入栏宽度缩短至 max-width 600px
+8. `npm run build` 编译通过

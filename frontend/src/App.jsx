@@ -5,13 +5,28 @@ import VoiceInput from './components/VoiceInput'
 import Background from './components/Background'
 import Particles from './components/Particles'
 import MoodOverlay from './components/MoodOverlay'
+import MoodIndicator from './components/MoodIndicator'
+import QuickReplies from './components/QuickReplies'
+import TouchRipple from './components/TouchRipple'
 import DialogueBox from './components/DialogueBox'
 import DialogueHistory from './components/DialogueHistory'
+import IconButton from './components/IconButton'
+import { SettingsIcon, HistoryIcon, MusicIcon, SpeakerIcon, SpeakerOffIcon } from './components/icons'
 import { api } from './api/client'
 import { useLipSync } from './hooks/useLipSync'
 import { getTimeOfDay } from './utils/timeOfDay'
 import audioManager from './audio/AudioManager'
 import './App.css'
+
+function expressionToRimColor(expression) {
+  switch (expression) {
+    case 'shy':   return 'rgba(255, 130, 180, 0.2)'
+    case 'angry': return 'rgba(220, 60, 60, 0.18)'
+    case 'sad':   return 'rgba(100, 140, 220, 0.18)'
+    case 'happy': return 'rgba(255, 220, 100, 0.18)'
+    default:      return 'rgba(47, 164, 231, 0.15)'
+  }
+}
 
 function App() {
   const [input, setInput] = useState('')
@@ -28,6 +43,9 @@ function App() {
   const [initialized, setInitialized] = useState(null) // null=加载中, false=未初始化, true=已初始化
   const [timeOfDay, setTimeOfDay] = useState(getTimeOfDay)
   const [currentExpression, setCurrentExpression] = useState(null)
+  const [quickReplies, setQuickReplies] = useState([])
+  const [touchCooldown, setTouchCooldown] = useState(false)
+  const [ripple, setRipple] = useState(null)
   const [bgmMuted, setBgmMuted] = useState(() => JSON.parse(localStorage.getItem('bgmMuted') || 'false'))
   const [ttsEnabled, setTtsEnabled] = useState(() => {
     const saved = localStorage.getItem('ttsEnabled')
@@ -167,9 +185,26 @@ function App() {
 
   const closeHistory = useCallback(() => setShowHistory(false), [])
 
+  const TOUCH_MESSAGES = {
+    head: '[用户摸了摸你的头]',
+    face: '[用户捏了捏你的脸]',
+    body: '[用户戳了戳你]',
+  }
+
+  const handleTouch = (area, pos) => {
+    setRipple({ x: pos.x, y: pos.y })
+    setTimeout(() => setRipple(null), 600)
+
+    if (touchCooldown || loading) return
+    setTouchCooldown(true)
+    setTimeout(() => setTouchCooldown(false), 3000)
+    handleSendMessage(TOUCH_MESSAGES[area])
+  }
+
   const handleSendMessage = (directMessage) => {
     const text = directMessage ?? input
     if (!text.trim()) return
+    setQuickReplies([])
     warmUp() // 在用户手势上下文中预热 AudioContext
     audioManager.tryAutoPlay()
     if (!directMessage) {
@@ -254,6 +289,7 @@ function App() {
           playWithLipSync(audioBase64)
         }
       },
+      onQuickReplies: (replies) => setQuickReplies(replies),
       onInitComplete: (persona) => {
         setInitialized(true)
         if (persona?.char_name) {
@@ -301,33 +337,47 @@ function App() {
   }
 
   return (
-    <div className="app">
+    <div className="app" style={{ '--rim-color': expressionToRimColor(currentExpression) }}>
       {/* 场景背景 */}
       <Background />
       <Particles timeOfDay={timeOfDay} />
       <div className="vignette" />
       <MoodOverlay expression={currentExpression} />
+      <MoodIndicator expression={currentExpression} />
 
       {/* 右上角按钮组 */}
       {initialized && (
         <>
-          <button
-            className={`bgm-toggle${bgmMuted ? ' off' : ''}`}
+          <IconButton
+            icon={ttsEnabled ? SpeakerIcon : SpeakerOffIcon}
+            className={`btn-pos-tts${ttsEnabled ? '' : ' off'}`}
+            active={ttsEnabled}
+            label={ttsEnabled ? 'TTS 开启' : 'TTS 关闭'}
+            onClick={toggleTts}
+          />
+          <IconButton
+            icon={MusicIcon}
+            className={`btn-pos-bgm${bgmMuted ? ' off' : ''}`}
+            active={!bgmMuted}
+            label={bgmMuted ? 'BGM 关闭' : 'BGM 开启'}
             onClick={() => {
               audioManager.tryAutoPlay()
               const muted = audioManager.toggle()
               setBgmMuted(muted)
             }}
-            title={bgmMuted ? 'BGM 关闭' : 'BGM 开启'}
-          >
-            {bgmMuted ? '♪' : '♫'}
-          </button>
-          <button className="history-btn" onClick={() => setShowHistory(true)} title="对话历史">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M3 6h18M3 12h18M3 18h12" />
-            </svg>
-          </button>
-          <button className="config-btn" onClick={() => setShowConfig(true)} title="设置">⚙</button>
+          />
+          <IconButton
+            icon={HistoryIcon}
+            className="btn-pos-history"
+            label="对话历史"
+            onClick={() => setShowHistory(true)}
+          />
+          <IconButton
+            icon={SettingsIcon}
+            className="btn-pos-config"
+            label="设置"
+            onClick={() => setShowConfig(true)}
+          />
         </>
       )}
 
@@ -336,8 +386,15 @@ function App() {
 
       {/* Live2D 主区域 */}
       <div className="live2d-main">
-        <Live2DDisplay ref={live2dRef} />
+        <Live2DDisplay ref={live2dRef} onTouch={handleTouch} />
       </div>
+
+      {/* 快捷回复 */}
+      <QuickReplies
+        options={quickReplies}
+        visible={quickReplies.length > 0}
+        onSelect={(opt) => { setQuickReplies([]); handleSendMessage(opt) }}
+      />
 
       {/* 底部对话面板（台词 + 输入） */}
       <DialogueBox
@@ -353,7 +410,10 @@ function App() {
           <input
             className={`chat-input${sentStatus ? ` sent-${sentStatus}` : ''}`}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value)
+              if (quickReplies.length) setQuickReplies([])
+            }}
             onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
             placeholder={initialized ? "输入消息..." : "说点什么吧..."}
             autoFocus
@@ -361,16 +421,12 @@ function App() {
           />
           {sentStatus === 'pending' && <div className="input-spinner" />}
         </div>
-        <button
-          className={`tts-toggle${ttsEnabled ? '' : ' off'}`}
-          onClick={toggleTts}
-          title={ttsEnabled ? 'TTS 开启' : 'TTS 关闭'}
-        >
-          {ttsEnabled ? '🔊' : '🔇'}
-        </button>
       </DialogueBox>
 
       {/* 对话历史 */}
+      {/* 触摸涟漪 */}
+      {ripple && <TouchRipple x={ripple.x} y={ripple.y} />}
+
       <DialogueHistory
         history={dialogueHistory}
         charName={charName}

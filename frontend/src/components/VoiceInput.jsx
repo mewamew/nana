@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { MicIcon } from './icons'
 import { api } from '../api/client'
 import './VoiceInput.css'
 
@@ -78,7 +79,7 @@ export default function VoiceInput({ onTranscribed, onAutoSend }) {
     setRecording(false)
   }
 
-  let label = '🎤'
+  let label = <MicIcon size={20} />
   if (recording) label = `${elapsed}s`
   if (transcribing) label = '...'
 

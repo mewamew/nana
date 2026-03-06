@@ -1,0 +1,6 @@
+export { default as MicIcon } from './MicIcon'
+export { default as SpeakerIcon } from './SpeakerIcon'
+export { default as SpeakerOffIcon } from './SpeakerOffIcon'
+export { default as SettingsIcon } from './SettingsIcon'
+export { default as MusicIcon } from './MusicIcon'
+export { default as HistoryIcon } from './HistoryIcon'

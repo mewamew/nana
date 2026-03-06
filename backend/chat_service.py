@@ -61,6 +61,17 @@ class ChatService:
             self._locks[session_id] = asyncio.Lock()
         return self._locks[session_id]
 
+    @staticmethod
+    def _try_extract_quick_replies(text: str) -> list[str] | None:
+        try:
+            data = parse_llm_json(text)
+            replies = data.get("quick_replies")
+            if isinstance(replies, list) and all(isinstance(r, str) for r in replies):
+                return replies
+        except Exception:
+            pass
+        return None
+
     def _try_extract_expression(self, accumulated: str) -> str | None:
         match = self._EXPRESSION_PATTERN.search(accumulated)
         if match:
@@ -118,6 +129,11 @@ class ChatService:
                     "char_name": self.main_agent.persona["char_name"],
                     "user_name": self.main_agent.persona["user_name"],
                 }, ensure_ascii=False)}
+
+            # 提取快捷回复选项
+            quick_replies = self._try_extract_quick_replies(full_text)
+            if quick_replies:
+                yield {"type": "quick_replies", "content": json.dumps(quick_replies, ensure_ascii=False)}
 
             if tts_enabled:
                 try:

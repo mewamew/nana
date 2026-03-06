@@ -548,6 +548,136 @@ const handleSendMessage = async () => {
 
 ---
 
+## 待修复项
+
+### P0：角色主动开口（苏醒第一句话）
+
+**问题**：Spec 描述"角色刚苏醒"，第 1 轮应由角色先说话（揉眼睛、打哈欠），但当前实现要求用户先发消息，违背"苏醒"叙事逻辑。
+
+**方案**：`/api/status` 在返回 `initialized: false` 时，附带 `greeting` 字段。前端检测到未初始化后，立即用这条消息渲染角色的第一句话，无需用户先开口。
+
+```python
+# main.py — /api/status
+@app.get("/api/status")
+async def get_status():
+    persona = load_persona()
+    result = {
+        "initialized": persona is not None,
+        "persona": { ... } if persona else None,
+    }
+    if not persona:
+        # 生成苏醒第一句话（或使用固定文案）
+        result["greeting"] = {
+            "reply": "（揉揉眼睛）……嗯？这里是……哪里？",
+            "expression": "咪咪眼"
+        }
+    return JSONResponse(content=result)
+```
+
+前端收到后直接渲染到聊天列表，用户再回复即进入第 2 轮。
+
+---
+
+### P1：初始化中途刷新导致对话历史残留
+
+**问题**：`_handle_init_response` 每轮都将对话写入 `conversation_history`。用户在第 3 轮刷新后，`get_context()` 返回旧的初始化对话，但 `is_initialized()` 仍为 false，LLM 看到"已经问过名字"却用户重新开始，产生不一致。
+
+**方案**：初始化模式使用独立的对话缓冲区，不写入主 `conversation_history`。仅在 `done=true` 时将完整初始化对话一次性写入。
+
+```python
+class MainAgent:
+    def __init__(self, ...):
+        ...
+        self._init_history: list[tuple[str, str]] = []  # 初始化对话缓冲
+
+    async def _handle_init_response(self, message, raw_response):
+        data = self._parse_json(raw_response)
+        reply_text = data.get("reply", "")
+
+        if reply_text:
+            self._log_conversation("assistant", reply_text)
+            self._init_history.append((message, reply_text))  # 缓冲，不写主历史
+
+        if data.get("done") and data.get("char_name") and data.get("user_name"):
+            persona = save_persona(data["char_name"], data["user_name"])
+            self.persona = persona
+            self.initialized = True
+            self._load_normal_prompts()
+            # 初始化完成，将缓冲的对话写入主历史
+            for user_msg, bot_msg in self._init_history:
+                await self.conversation_history.add_dialog(user_msg, bot_msg)
+            self._init_history.clear()
+
+    async def _init_stream(self, message: str):
+        # chat_history 从缓冲区构建，而非 conversation_history
+        context = "\n".join(
+            f"用户: {u}\n角色: {b}" for u, b in self._init_history
+        ) or "（这是第一句话）"
+        prompt = self.init_template.format(chat_history=context)
+        ...
+```
+
+---
+
+### P1：`_init_stream` 消息结构不规范
+
+**问题**：当前实现将 system prompt 和用户消息拼接在一个 `user` message 中，LLM 无法区分指令与用户输入，且存在潜在注入风险（用户输入含 `"用户说："` 等文本时）。
+
+**Spec 原始设计**：
+```python
+messages = [
+    {"role": "system", "content": prompt},
+    {"role": "user", "content": message}
+]
+```
+
+**方案**：按 spec 原始设计分离 system / user 消息。
+
+---
+
+### P2：非流式 `reply()` 未适配初始化模式
+
+**问题**：`main_agent.py` 的 `reply()` 方法（L273）没有 `self.initialized` 检查。初始化模式下 `self.prompt_template` 未定义，调用会抛 `AttributeError`。
+
+**方案**：在 `reply()` 方法顶部加 guard：
+
+```python
+async def reply(self, message: str) -> Tuple[str, str]:
+    if not self.initialized:
+        raise RuntimeError("Cannot use non-streaming reply in init mode")
+    ...
+```
+
+---
+
+### P2：persona 字段缺少空白校验
+
+**问题**：`load_persona()` 用 truthiness 检查字段，但纯空格字符串 `"   "` 会通过。LLM 返回的 `char_name` / `user_name` 也没做 `.strip()`。
+
+**方案**：
+
+```python
+# persona.py
+def load_persona() -> dict | None:
+    try:
+        with open(PERSONA_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("char_name", "").strip() and data.get("user_name", "").strip():
+            return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return None
+
+def save_persona(char_name: str, user_name: str) -> dict:
+    char_name = char_name.strip()
+    user_name = user_name.strip()
+    if not char_name or not user_name:
+        raise ValueError("char_name and user_name must not be blank")
+    ...
+```
+
+---
+
 ## 未实现（待规划）
 
 - 前端初始化模式的特殊视觉效果（苏醒动画、渐入等）

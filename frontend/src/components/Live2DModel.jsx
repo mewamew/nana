@@ -5,7 +5,7 @@ import { Live2DModel } from 'pixi-live2d-display/cubism4'
 // 将 PIXI 暴露到 window 上
 window.PIXI = PIXI;
 
-const Live2DDisplay = forwardRef((props, ref) => {
+const Live2DDisplay = forwardRef(({ onTouch }, ref) => {
   const pixiContainerRef = useRef(null)
   const appRef = useRef(null)
   const modelRef = useRef(null)
@@ -184,10 +184,26 @@ const Live2DDisplay = forwardRef((props, ref) => {
 
         app.stage.addChild(model)
 
-        // 鼠标左键点击播放"摇头晃脑"动作
-        app.view.addEventListener('click', () => {
+        // 点击触摸检测
+        app.view.addEventListener('click', (e) => {
           if (!modelRef.current) return
-          modelRef.current.motion('')
+          const model = modelRef.current
+          const bounds = model.getBounds()
+
+          const x = e.offsetX, y = e.offsetY
+          // 不在模型范围内 → 忽略
+          if (x < bounds.x || x > bounds.x + bounds.width ||
+              y < bounds.y || y > bounds.y + bounds.height) return
+
+          const relY = (y - bounds.y) / bounds.height
+          let area = 'body'
+          if (relY < 0.25) area = 'head'
+          else if (relY < 0.45) area = 'face'
+
+          // 播放动作
+          model.motion('')
+          // 回调父组件
+          onTouch?.(area, { x: e.clientX, y: e.clientY })
         })
 
         window.__pixiApp = app

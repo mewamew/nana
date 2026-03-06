@@ -6,7 +6,7 @@ export const api = {
    * callbacks: { onText, onExpression, onAudio, onDone, onError }
    */
   chatStream(message, ttsEnabled = true, callbacks = {}, options = {}) {
-    const { onText, onExpression, onAudio, onDone, onError, onGenerationId, onInitComplete } = callbacks
+    const { onText, onExpression, onAudio, onDone, onError, onGenerationId, onInitComplete, onQuickReplies } = callbacks
     const { signal } = options
 
     const run = async () => {
@@ -61,6 +61,9 @@ export const api = {
                   break
                 case "init_complete":
                   onInitComplete?.(JSON.parse(parsed.content))
+                  break
+                case "quick_replies":
+                  onQuickReplies?.(JSON.parse(parsed.content))
                   break
                 case "done":
                   onDone?.()
